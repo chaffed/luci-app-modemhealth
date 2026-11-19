@@ -35,7 +35,7 @@ jobs:
             mkdir -p /var/lock
             opkg update >/dev/null
             opkg install /dist/*.ipk
-            test "$(stat -c %a /etc/config/modemhealth)" = 600
+            ls -l /etc/config/modemhealth | grep -q "^-rw------- "
             modemhealth check || true
             grep -q ",failed,no_password," /etc/modemhealth/readings.csv'
 
