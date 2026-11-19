@@ -8,18 +8,19 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=luci-app-modemhealth
 PKG_VERSION:=0.1.0
-PKG_RELEASE:=1
+PKG_RELEASE:=2
 PKG_LICENSE:=MIT
 
 LUCI_TITLE:=Modem Health - cable modem signal, errors and outages
 LUCI_DESCRIPTION:=Reads a cable modem's status (SURFboard S33/S34) on a \
 	schedule, keeps its signal levels, error counts, event log, reboots and \
 	outages as evidence, and builds a report for the ISP.
-LUCI_DEPENDS:=+curl +jsonfilter +openssl-util
+LUCI_DEPENDS:=+luci-base +curl +jsonfilter +openssl-util
 LUCI_PKGARCH:=all
 
 define Package/luci-app-modemhealth/conffiles
 /etc/config/modemhealth
+/etc/config/modemhealth_auth
 endef
 
 include ../../luci.mk

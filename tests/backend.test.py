@@ -147,6 +147,8 @@ def main():
 
         host = "modem:%d" % PORT
         CTL = "curl -sk \"https://modem:%d/_control/set?%%s\" >/dev/null" % PORT
+        with open(os.path.join(out, "pw"), "w") as f:
+            f.write(PASSWORD)
         run_in_openwrt(out, [
             ("good", config(host, PASSWORD, "/out/good/data"), ":"),
             ("wrong_password", config(host, PASSWORD + "x", "/out/wrong_password/data"), ":"),
@@ -210,6 +212,25 @@ def main():
              "modemhealth check >/dev/null; modemhealth check >/dev/null; " + CTL % "new_events=5"),
             # The internet doesn't answer pings (an outage) while the modem does.
             ("no_internet", config(host, PASSWORD, "/out/no_internet/data", ping_host="nonexistent.invalid"), ":"),
+            # Web interface commands.
+            ("web_status", config(host, PASSWORD, "/out/web_status/data"), "modemhealth check >/dev/null", ":", "modemhealth status"),
+            ("web_data", config(host, PASSWORD, "/out/web_data/data"),
+             "modemhealth check >/dev/null; modemhealth check >/dev/null",
+             "modemhealth data $(( $(date +%s) + 3600 )) > /out/web_data/future.json", "modemhealth data 0"),
+            # Test connection with what is typed (password in the environment),
+            # storing nothing and leaving the kept session alone.
+            ("web_test", config(host, "", "/out/web_test/data"), ":",
+             "ls /var/run/modemhealth/session > /out/web_test/session 2>&1 || true",
+             "MH_PASSWORD=$(cat /out/pw) modemhealth test"),
+            ("web_test_bad", config(host, "", "/out/web_test_bad/data"), ":", ":",
+             "MH_PASSWORD=wrong modemhealth test"),
+            # A new password saved from the web page goes to modemhealth_auth;
+            # one kept with the settings by an older version is removed.
+            ("set_password", config(host, "old-password", "/out/set_password/data"), ":",
+             "ls -l /etc/config/modemhealth_auth > /out/set_password/auth_ls; "
+             "grep -c \"option password\" /etc/config/modemhealth > /out/set_password/legacy || true; "
+             "modemhealth check > /out/set_password/check.txt 2>&1",
+             "modemhealth set-password < /out/pw"),
             ("daemon", config(host, PASSWORD, "/out/daemon/data"),
              "mkdir -p /var/state; touch /var/state/dnsmasqsec",
              "pgrep -f 'modemhealth daemon' > /out/daemon/left_running || true",
@@ -372,6 +393,39 @@ def main():
         r = stored(os.path.join(out, "no_internet"), "readings")[0]
         check(r["result"] == "ok" and r["inet_ping_loss"] == "100" and r["inet_ping_ms"] == "" and r["modem_ping_loss"] == "0",
               "pings: no answer from the internet is 100%% loss with no time; the modem still answers")
+
+        d = os.path.join(out, "web_status")
+        raw = open(os.path.join(d, "output.txt")).read()
+        st = json.loads(raw)
+        check(st["password_set"] is True and PASSWORD not in raw and "Pa ss" not in raw, "web status: says a password is set, never what it is")
+        check(st["modem"].get("model") == "S34" and st["modem"].get("mac") == "00:00:5E:00:53:01", "web status: modem identity")
+        check(st["last"].split(",")[1] == "ok" and st["readings_header"].startswith("ts,result,"), "web status: latest reading and its columns")
+        check(st["enabled"] is True and st["interval"] == 5 and st["scheduler"] is False, "web status: settings and scheduler state")
+
+        d = os.path.join(out, "web_data")
+        data = json.loads(open(os.path.join(d, "output.txt")).read())
+        lines = lambda k: [l for l in data[k].split("\n") if l]
+        check(len(lines("readings")) == 3 and len(lines("channels")) == 1 + 2 * 39, "web data: readings and channels of both checks, with headers")
+        check(len(lines("events")) == 1 + 87 and len(lines("channelmap")) == 1 + 39, "web data: events and the channel line-up")
+        future = json.loads(open(os.path.join(d, "future.json")).read())
+        check(len([l for l in future["readings"].split("\n") if l]) == 1, "web data: nothing outside the period asked for")
+
+        d = os.path.join(out, "web_test")
+        res = json.loads(open(os.path.join(d, "output.txt")).read())
+        check(res == {"ok": True, "model": "S34", "firmware": "AT01.01.010.042324_S3.04.735", "downstream": 34, "upstream": 5},
+              "web test: logs in with the typed password and reports the modem (%s)" % res)
+        check(stored(d, "readings") == [] and "No such file" in open(os.path.join(d, "session")).read(),
+              "web test: stores nothing and keeps no session")
+        check(json.load(open(os.path.join(d, "modem_state.json")))["logouts"] == 1, "web test: logs out afterwards")
+        res = json.loads(open(os.path.join(out, "web_test_bad", "output.txt")).read())
+        check(res == {"ok": False, "reason": "login_refused"}, "web test: a wrong password is reported as refused")
+
+        d = os.path.join(out, "set_password")
+        check(json.loads(open(os.path.join(d, "output.txt")).read()) == {"ok": True}, "set password: done")
+        check(open(os.path.join(d, "auth_ls")).read().startswith("-rw------- "), "set password: modemhealth_auth is root only")
+        check(open(os.path.join(d, "legacy")).read().strip() == "0",
+              "set password: the old password is removed from the settings (%r)" % open(os.path.join(d, "legacy")).read())
+        check(open(os.path.join(d, "check.txt")).read().startswith("ok:"), "set password: checks log in with the new password")
 
         d = os.path.join(out, "daemon")
         state = json.load(open(os.path.join(d, "modem_state.json")))

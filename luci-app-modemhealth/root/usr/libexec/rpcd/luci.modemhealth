@@ -1,0 +1,47 @@
+#!/bin/sh
+# rpcd plugin exposing Modem Health to the web interface as ubus object
+# "luci.modemhealth". The modem password goes in (set_password, test) but
+# never comes out.
+# shellcheck shell=dash disable=SC1091,SC2154
+
+. /usr/share/libubox/jshn.sh
+
+case "$1" in
+	list)
+		echo '{"status":{},"data":{"since":0,"until":0},"check":{},"test":{"host":"str","username":"str","password":"str"},"set_password":{"password":"str"}}'
+		;;
+	call)
+		case "$2" in
+			status)
+				/usr/bin/modemhealth status
+				;;
+			data)
+				read -r input
+				json_load "$input"
+				json_get_var since since
+				json_get_var until until
+				/usr/bin/modemhealth data "${since:-0}" "${until:-}"
+				;;
+			check)
+				/usr/bin/modemhealth check >/dev/null 2>&1
+				/usr/bin/modemhealth status
+				;;
+			test)
+				read -r input
+				json_load "$input"
+				json_get_var host host
+				json_get_var username username
+				json_get_var password password
+				# Through the environment, not the command line, which any
+				# process on the router can read.
+				MH_HOST="$host" MH_USER="$username" MH_PASSWORD="$password" /usr/bin/modemhealth test
+				;;
+			set_password)
+				read -r input
+				json_load "$input"
+				json_get_var password password
+				printf '%s\n' "$password" | /usr/bin/modemhealth set-password
+				;;
+		esac
+		;;
+esac
