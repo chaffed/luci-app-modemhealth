@@ -22,6 +22,15 @@ jobs:
       - name: Check Python syntax
         run: python3 -m py_compile tests/*.py tools/*.py
 
+      - name: Check JavaScript syntax
+        run: |
+          for f in $(find luci-app-modemhealth/htdocs -name '*.js'); do
+            node -e "new Function(require('fs').readFileSync('$f', 'utf8'))"
+          done
+
+      - name: Test the health rules
+        run: node tests/health.test.js
+
       - name: Test the backend against the fake modem (OpenWrt 23.05 container)
         run: python3 tests/backend.test.py
 
