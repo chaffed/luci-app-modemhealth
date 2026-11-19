@@ -98,6 +98,10 @@ mh.load(T - 3 * 3600, T + 7 * S).then(function(D) {
 	eq([ mh.fmtDuration(45), mh.fmtDuration(900), mh.fmtDuration(5400), mh.fmtDuration(90000), mh.fmtDuration(null) ],
 		[ '45 s', '15 min', '1 h 30 min', '1 d 1 h', 'unknown' ], 'texts: durations');
 	eq(mh.fmtInt('1234567'), '1,234,567', 'texts: thousands separators');
+	var grouped = mh.groupReasons(D.readings[0].verdict.reasons);
+	eq(grouped.map(function(g) { return mh.groupedText(g); }),
+		[ 'Upstream power (SC-QAM, 4 channels) marginal on 4 channels: 50 to 50.8 dBmV.' ],
+		'texts: the four marginal upstream channels are one line with the range of values');
 }).catch(function(e) { fail++; console.log('FAIL ' + e.stack); }).then(function() {
 	console.log(fail ? '\n' + fail + ' check(s) failed' : '\nall checks passed');
 	process.exit(fail ? 1 : 0);

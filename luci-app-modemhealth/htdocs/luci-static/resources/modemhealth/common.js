@@ -177,6 +177,32 @@ function reasonText(r, hours) {
 	return r.kind;
 }
 
+/* Channel reasons of the same kind and level become one line: "Upstream
+ * power (SC-QAM, 4 channels) marginal on 4 channels: 50.0 to 50.8 dBmV." */
+function groupReasons(reasons) {
+	var out = [], groups = {};
+	(reasons || []).forEach(function(r) {
+		if (!r.channel) { out.push(r); return; }
+		var k = r.kind + '|' + r.level + '|' + ((r.limit || {}).label || '');
+		if (!groups[k]) out.push(groups[k] = { kind: r.kind, level: r.level, limit: r.limit, channels: [], values: [], grouped: true });
+		groups[k].channels.push(r.channel);
+		if (typeof r.value === 'number') groups[k].values.push(r.value);
+	});
+	return out;
+}
+
+function groupedText(g, hours) {
+	if (!g.grouped) return reasonText(g, hours);
+	var L = g.limit || {}, v = g.values;
+	var range = !v.length ? '' : (Math.min.apply(null, v) === Math.max.apply(null, v)
+		? String(Math.min.apply(null, v)) : _('%s to %s').format(Math.min.apply(null, v), Math.max.apply(null, v)));
+	var where = g.channels.length === 1
+		? _('channel %s').format(g.channels[0].channel_id)
+		: _('%d channels').format(g.channels.length);
+	if (g.kind.slice(-5) === '_lock') return _('%s not locked on %s.').format(g.channels[0].dir === 'ds' ? _('Downstream') : _('Upstream'), where);
+	return _('%s %s on %s: %s %s.').format(L.label || g.kind, LEVEL_TEXT[g.level], where, range, L.unit || '');
+}
+
 /* --------------------------------------------------------------- charts -- */
 
 function S(tag, attrs, children) {
@@ -247,12 +273,17 @@ function lineChart(o) {
 			});
 			return;
 		}
-		var d = '', prev = null;
-		s.points.forEach(function(p) {
+		var d = '', prev = null, pts = s.points;
+		var joined = function(a, b) { return a && b && a[1] != null && b[1] != null && !(o.gap && b[0] - a[0] > o.gap); };
+		pts.forEach(function(p, i) {
 			if (p[1] == null) { prev = null; return; }
 			var brk = prev == null || (o.gap && p[0] - prev > o.gap);
 			d += (brk ? 'M' : 'L') + x(p[0]).toFixed(1) + ',' + y(p[1]).toFixed(1);
 			prev = p[0];
+			/* A reading with no neighbour to join is drawn as a dot. */
+			if (!joined(pts[i - 1], p) && !joined(p, pts[i + 1]))
+				svg.appendChild(S('circle', { cx: x(p[0]), cy: y(p[1]), r: 3, fill: s.color },
+					[ S('title', {}, [ '%s · %s: %s'.format(fmtTime(p[0]), s.name, String(p[1])) ]) ]));
 		});
 		if (d) svg.appendChild(S('path', { d: d, fill: 'none', stroke: s.color, 'stroke-width': 1.6, 'stroke-dasharray': s.dash || null },
 			[ S('title', {}, [ s.name ]) ]));
@@ -279,6 +310,6 @@ return baseclass.extend({
 	callStatus: callStatus, callData: callData, callCheck: callCheck, callTest: callTest, callSetPassword: callSetPassword,
 	parseCSV: parseCSV, load: load, analyse: analyse,
 	fmtTime: fmtTime, fmtShort: fmtShort, fmtDuration: fmtDuration, fmtNum: fmtNum, fmtInt: fmtInt, fmtLimit: fmtLimit,
-	LEVEL_TEXT: LEVEL_TEXT, reasonText: reasonText,
+	LEVEL_TEXT: LEVEL_TEXT, reasonText: reasonText, groupReasons: groupReasons, groupedText: groupedText,
 	lineChart: lineChart, legend: legend
 });

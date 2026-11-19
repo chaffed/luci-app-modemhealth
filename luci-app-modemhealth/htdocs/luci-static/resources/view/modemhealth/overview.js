@@ -98,7 +98,10 @@ function bandsFor(limit) {
 }
 
 function charts(D) {
-	var from = D.since, to = D.until, gap = Math.max(D.interval * 60 * 3, 900);
+	/* Start where the data starts when there is less than the period. */
+	var first = Math.min(D.readings.length ? +D.readings[0].ts : Infinity, D.events.length ? D.events[0].ts : Infinity);
+	var to = D.until, from = Math.max(D.since, isFinite(first) ? first - Math.max((to - first) * 0.03, 300) : D.since);
+	var gap = Math.max(D.interval * 60 * 3, 900);
 	var spans = D.outages.map(function(o) {
 		return { from: o.start - 60, to: (o.end || o.start) + 60, color: mh.C.bad,
 			label: _('Outage, %s: %s').format(mh.fmtTime(o.start), o.kind === 'line_down' ? _('line down') : _('modem unreachable')) };
@@ -212,7 +215,7 @@ return view.extend({
 			? (st.next_check ? _('Next check at %s.').format(mh.fmtTime(st.next_check).split(' ')[1]) : (st.synced === false ? _('Waiting for the router\'s clock to be set.') : ''))
 			: _('Scheduled checks are off.');
 		var periodReasons = D.period.reasons.slice(0, 6).map(function(r) { return mh.reasonText(r, D.period.hours); });
-		var lastReasons = lastV ? lastV.reasons.slice(0, 6).map(function(r) { return mh.reasonText(r); }) : [];
+		var lastReasons = lastV ? mh.groupReasons(lastV.reasons).slice(0, 6).map(function(g) { return mh.groupedText(g); }) : [];
 		var modem = st.modem || {};
 		return E('div', {}, [
 			setup,
