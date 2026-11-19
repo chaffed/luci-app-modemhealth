@@ -3,3 +3,4 @@ dist/
 .scratch/
 capture-raw/
 __pycache__/
+.test-out/

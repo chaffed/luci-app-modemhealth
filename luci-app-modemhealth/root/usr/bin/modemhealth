@@ -1,0 +1,238 @@
+#!/bin/sh
+# Modem Health: read a cable modem's status and keep it as evidence.
+#
+#   modemhealth check   read the modem once and store the reading
+#   modemhealth last    print the latest stored reading
+#
+# Supported modems: ARRIS/Vantiva SURFboard S33 and S34 (HNAP, HMAC-SHA256).
+# The modem reader (the "modem_*" functions) only logs in and turns replies
+# into lines; storage is separate, so other models can be added as readers.
+#
+# SPDX-License-Identifier: MIT
+# shellcheck shell=dash
+
+CONFIG=modemhealth
+HNAP_NS='http://purenetworks.com/HNAP1/'
+STATUS_ACTIONS='GetCustomerStatusStartupSequence GetCustomerStatusConnectionInfo GetCustomerStatusDownstreamChannelInfo GetCustomerStatusUpstreamChannelInfo GetCustomerStatusSoftware'
+READINGS_HEADER='ts,result,reason,model,firmware,uptime_s,connectivity,boot,network_access,modem_time,ds_channels,us_channels'
+CHANNELS_HEADER='ts,dir,ch,lock,modulation,channel_id,freq_hz,width_hz,power_dbmv,snr_db,corrected,uncorrectable'
+
+log() { logger -t modemhealth "$*" 2>/dev/null; [ -t 2 ] && echo "modemhealth: $*" >&2; return 0; }
+
+# Text from the modem goes into CSV files and, later, web pages: keep it to
+# printable characters without the CSV and HTML specials.
+clean() { printf '%s' "$*" | tr -d '\000-\037",\\<>' | cut -c1-120; }
+
+json_str() { printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
+
+load_config() {
+	HOST=$(uci -q get "$CONFIG.main.host"); HOST=${HOST:-192.168.100.1}
+	USERNAME=$(uci -q get "$CONFIG.main.username"); USERNAME=${USERNAME:-admin}
+	PASSWORD=$(uci -q get "$CONFIG.main.password")
+	DATA_DIR=$(uci -q get "$CONFIG.main.data_dir"); DATA_DIR=${DATA_DIR:-/etc/modemhealth}
+	TIMEOUT=$(uci -q get "$CONFIG.main.timeout"); TIMEOUT=${TIMEOUT:-15}
+	RUN_DIR=${MODEMHEALTH_RUN_DIR:-/var/run/modemhealth}
+	BASE="https://$HOST"
+}
+
+# ---------------------------------------------------------------- modem reader
+# SURFboard S33/S34: HNAP over JSON, every request signed with HMAC-SHA256.
+# Worked out from the modem's own Login.js, hnap.js and SOAPAction.js.
+
+hmac() { # $1=key $2=message -> uppercase hex HMAC-SHA256
+	printf '%s' "$2" | openssl dgst -sha256 -hmac "$1" 2>/dev/null | sed 's/^.*= *//' | tr 'abcdef' 'ABCDEF'
+}
+
+now_ms() { # the modem's web page sends Date.now() % 2000000000000
+	local up cs
+	read -r up _ < /proc/uptime
+	cs=${up#*.}
+	echo $(( $(date +%s)${cs}0 % 2000000000000 ))
+}
+
+# hnap ACTION BODY OUTFILE -> sets HTTP_CODE; returns curl's exit code
+hnap() {
+	local action=$1 body=$2 out=$3 sa ts auth rc
+	sa="\"$HNAP_NS$action\""
+	ts=$(now_ms)
+	auth=$(hmac "${PRIVATE_KEY:-withoutloginkey}" "$ts$sa")
+	[ -n "$auth" ] || { HTTP_CODE=000; return 99; }
+	if [ -n "$SESSION_UID" ]; then
+		set -- -H "Cookie: uid=$SESSION_UID; PrivateKey=$PRIVATE_KEY"
+	else
+		set --
+	fi
+	# -k: the modem's certificate is self-signed, and it is only ever this host.
+	HTTP_CODE=$(curl -sk --max-time "$TIMEOUT" -o "$out" -w '%{http_code}' \
+		-H 'Content-Type: application/json; charset=utf-8' \
+		-H 'Accept: application/json' \
+		-H "SOAPAction: $sa" \
+		-H "HNAP_AUTH: $auth $ts" \
+		"$@" \
+		--data-binary "$body" "$BASE/HNAP1/")
+	rc=$?
+	return $rc
+}
+
+# Sets FAIL_REASON on failure.
+curl_failed() { # $1=curl exit code
+	case $1 in
+		6|7) FAIL_REASON=unreachable ;;
+		28) FAIL_REASON=timeout ;;
+		35|60) FAIL_REASON=tls_error ;;
+		99) FAIL_REASON=no_openssl ;;
+		*) FAIL_REASON="curl_error_$1" ;;
+	esac
+}
+
+modem_login() {
+	local out="$RUN_DIR/login.json" rc challenge public_key cookie result
+	PRIVATE_KEY=; SESSION_UID=
+	if [ -z "$PASSWORD" ]; then FAIL_REASON=no_password; return 1; fi
+	hnap Login "{\"Login\":{\"Action\":\"request\",\"Username\":$(json_str "$USERNAME"),\"LoginPassword\":\"\",\"Captcha\":\"\",\"PrivateLogin\":\"LoginPassword\"}}" "$out"
+	rc=$?; [ $rc -eq 0 ] || { curl_failed $rc; return 1; }
+	[ "$HTTP_CODE" = 200 ] || { FAIL_REASON="http_$HTTP_CODE"; return 1; }
+	challenge=$(jsonfilter -i "$out" -e '@.LoginResponse.Challenge' 2>/dev/null)
+	public_key=$(jsonfilter -i "$out" -e '@.LoginResponse.PublicKey' 2>/dev/null)
+	cookie=$(jsonfilter -i "$out" -e '@.LoginResponse.Cookie' 2>/dev/null)
+	if [ -z "$challenge" ] || [ -z "$public_key" ]; then FAIL_REASON=not_a_supported_modem; return 1; fi
+
+	PRIVATE_KEY=$(hmac "$public_key$PASSWORD" "$challenge")
+	SESSION_UID=$cookie
+	hnap Login "{\"Login\":{\"Action\":\"login\",\"Username\":$(json_str "$USERNAME"),\"LoginPassword\":\"$(hmac "$PRIVATE_KEY" "$challenge")\",\"Captcha\":\"\",\"PrivateLogin\":\"LoginPassword\"}}" "$out"
+	rc=$?; [ $rc -eq 0 ] || { curl_failed $rc; return 1; }
+	result=$(jsonfilter -i "$out" -e '@.LoginResponse.LoginResult' 2>/dev/null)
+	rm -f "$out"
+	case $result in
+		OK|OK_CHANGED) return 0 ;;
+		FAILED) FAIL_REASON=login_refused ;;
+		'') FAIL_REASON=bad_reply ;;
+		*) FAIL_REASON="login_$(clean "$result")" ;;
+	esac
+	PRIVATE_KEY=; SESSION_UID=
+	return 1
+}
+
+modem_logout() {
+	[ -n "$PRIVATE_KEY" ] || return 0
+	hnap Logout '{"Logout":{"Action":"logout","Captcha":""}}' /dev/null
+	PRIVATE_KEY=; SESSION_UID=
+	return 0
+}
+
+# Reads all status pages in one request into $RUN_DIR/status.json.
+modem_read_status() {
+	local body="" a rc out="$RUN_DIR/status.json" result
+	for a in $STATUS_ACTIONS; do body="$body${body:+,}\"$a\":\"\""; done
+	hnap GetMultipleHNAPs "{\"GetMultipleHNAPs\":{$body}}" "$out"
+	rc=$?; [ $rc -eq 0 ] || { curl_failed $rc; return 1; }
+	[ "$HTTP_CODE" = 200 ] || { FAIL_REASON="http_$HTTP_CODE"; return 1; }
+	result=$(jsonfilter -i "$out" -e '@.GetMultipleHNAPsResponse.GetMultipleHNAPsResult' 2>/dev/null)
+	[ "$result" = OK ] || { FAIL_REASON="status_$(clean "${result:-bad_reply}")"; return 1; }
+	return 0
+}
+
+# field NAME -> value of NAME in the reply to its status action
+status_field() { # $1=action $2=field
+	jsonfilter -i "$RUN_DIR/status.json" -e "@.GetMultipleHNAPsResponse.$1Response.$2" 2>/dev/null
+}
+
+uptime_seconds() { # "0 day(s) 01h:46m:05s" -> 6365
+	printf '%s' "$1" | awk '{
+		d = 0; h = 0; m = 0; s = 0
+		if (match($0, /[0-9]+ *day/)) d = substr($0, RSTART, RLENGTH) + 0
+		if (match($0, /[0-9]+h/)) h = substr($0, RSTART, RLENGTH - 1) + 0
+		if (match($0, /[0-9]+m/)) m = substr($0, RSTART, RLENGTH - 1) + 0
+		if (match($0, /[0-9]+s/)) s = substr($0, RSTART, RLENGTH - 1) + 0
+		if ($0 ~ /[0-9]/) print d * 86400 + h * 3600 + m * 60 + s
+	}'
+}
+
+# channel_rows TS DIR RAW -> CSV lines in CHANNELS_HEADER order
+# downstream: index^lock^modulation^id^freq^power^snr^corrected^uncorrectable^
+# upstream:   index^lock^type^id^width^freq^power^
+channel_rows() {
+	printf '%s' "$3" | tr -d '",\\<>' | awk -v ts="$1" -v dir="$2" '{
+		n = split($0, rows, /\|\+\|/)
+		for (i = 1; i <= n; i++) {
+			if (rows[i] == "") continue
+			split(rows[i], f, /\^/)
+			for (j = 1; j <= 9; j++) gsub(/^ +| +$/, "", f[j])
+			if (dir == "ds")
+				print ts ",ds," f[1] "," f[2] "," f[3] "," f[4] "," f[5] ",," f[6] "," f[7] "," f[8] "," f[9]
+			else
+				print ts ",us," f[1] "," f[2] "," f[3] "," f[4] "," f[6] "," f[5] "," f[7] ",,,"
+		}
+	}'
+}
+
+# --------------------------------------------------------------------- storage
+
+ensure_store() {
+	mkdir -p "$DATA_DIR" || return 1
+	[ -s "$DATA_DIR/readings.csv" ] || echo "$READINGS_HEADER" > "$DATA_DIR/readings.csv"
+	[ -s "$DATA_DIR/channels.csv" ] || echo "$CHANNELS_HEADER" > "$DATA_DIR/channels.csv"
+}
+
+store_failed() { # $1=ts $2=reason
+	echo "$1,failed,$(clean "$2"),,,,,,,,," >> "$DATA_DIR/readings.csv"
+}
+
+# ---------------------------------------------------------------------- check
+
+do_check() {
+	local ts rows ds us ds_n us_n uptime model firmware
+	load_config
+	mkdir -p "$RUN_DIR" && chmod 700 "$RUN_DIR"
+	ensure_store || { log "cannot write to $DATA_DIR"; return 1; }
+	ts=$(date +%s)
+	FAIL_REASON=
+
+	if ! modem_login || ! modem_read_status; then
+		modem_logout
+		store_failed "$ts" "$FAIL_REASON"
+		rm -f "$RUN_DIR/status.json"
+		log "check failed: $FAIL_REASON"
+		echo "failed: $FAIL_REASON"
+		return 1
+	fi
+	modem_logout
+
+	ds=$(status_field GetCustomerStatusDownstreamChannelInfo CustomerConnDownstreamChannel)
+	us=$(status_field GetCustomerStatusUpstreamChannelInfo CustomerConnUpstreamChannel)
+	rows=$( { channel_rows "$ts" ds "$ds"; channel_rows "$ts" us "$us"; } )
+	ds_n=$(printf '%s\n' "$rows" | grep -c '^[0-9]*,ds,')
+	us_n=$(printf '%s\n' "$rows" | grep -c '^[0-9]*,us,')
+	uptime=$(uptime_seconds "$(status_field GetCustomerStatusSoftware CustomerConnSystemUpTime)")
+	model=$(clean "$(status_field GetCustomerStatusSoftware StatusSoftwareModelName)")
+	firmware=$(clean "$(status_field GetCustomerStatusSoftware StatusSoftwareSfVer)")
+
+	[ -n "$rows" ] && printf '%s\n' "$rows" >> "$DATA_DIR/channels.csv"
+	echo "$ts,ok,,$model,$firmware,$uptime,$(clean "$(status_field GetCustomerStatusStartupSequence CustomerConnConnectivityComment)"),$(clean "$(status_field GetCustomerStatusStartupSequence CustomerConnBootComment)"),$(clean "$(status_field GetCustomerStatusConnectionInfo CustomerConnNetworkAccess)"),$(clean "$(status_field GetCustomerStatusConnectionInfo CustomerCurSystemTime)"),$ds_n,$us_n" >> "$DATA_DIR/readings.csv"
+
+	# What identifies the modem to the ISP; overwritten on every good reading.
+	{
+		echo "model=$model"
+		echo "firmware=$firmware"
+		echo "mac=$(clean "$(status_field GetCustomerStatusSoftware StatusSoftwareMac)")"
+		echo "docsis=$(clean "$(status_field GetCustomerStatusSoftware StatusSoftwareCustomerVer)")"
+	} > "$DATA_DIR/modem.txt"
+
+	rm -f "$RUN_DIR/status.json"
+	echo "ok: $model, $ds_n downstream and $us_n upstream channels, up ${uptime}s"
+}
+
+do_last() {
+	load_config
+	[ -s "$DATA_DIR/readings.csv" ] || { echo "no readings yet"; return 1; }
+	tail -n 1 "$DATA_DIR/readings.csv"
+}
+
+case "$1" in
+	check) do_check ;;
+	last) do_last ;;
+	*)
+		echo "usage: modemhealth check|last" >&2
+		exit 2
+		;;
+esac
