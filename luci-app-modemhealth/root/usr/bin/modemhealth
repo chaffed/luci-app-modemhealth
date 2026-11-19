@@ -239,6 +239,9 @@ do_last() {
 	tail -n 1 "$DATA_DIR/readings.csv"
 }
 
+# MODEMHEALTH_LIB=1: only define the functions (for probes and tests).
+[ "${MODEMHEALTH_LIB:-}" = 1 ] && return 0 2>/dev/null
+
 case "$1" in
 	check) do_check ;;
 	last) do_last ;;
