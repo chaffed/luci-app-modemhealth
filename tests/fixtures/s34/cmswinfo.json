@@ -1,0 +1,12 @@
+{
+  "GetCustomerStatusSoftwareResponse": {
+    "StatusSoftwareCustomerVer": "DOCSIS 3.1",
+    "StatusSoftwareModelName": "S34",
+    "StatusSoftwareSfVer": "AT01.01.010.042324_S3.04.735",
+    "StatusSoftwareMac": "00:00:5E:00:53:01",
+    "StatusSoftwareHdVer": "1.0",
+    "StatusSoftwareSerialNum": "000000000000000",
+    "CustomerConnSystemUpTime": "0 day(s) 01h:46m:05s",
+    "GetCustomerStatusSoftwareResult": "OK"
+  }
+}

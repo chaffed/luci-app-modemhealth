@@ -1,0 +1,8 @@
+{
+  "GetCustomerStatusCmaddressResponse": {
+    "StatusSoftwareModelName": "S34",
+    "StatusSoftwareMac": "00:00:5E:00:53:01",
+    "StatusSoftwareSerialNum": "000000000000000",
+    "GetCustomerStatusCmaddressResult": "OK"
+  }
+}
