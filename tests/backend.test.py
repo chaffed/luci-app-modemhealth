@@ -129,6 +129,14 @@ def main():
             ("wrong_password", config(host, PASSWORD + "x", "/out/wrong_password/data"), ":"),
             ("no_password", config(host, "", "/out/no_password/data"), ":"),
             ("unreachable", config("modem:1", PASSWORD, "/out/unreachable/data"), ":"),
+            # Back-to-back checks: every timestamp must be >= the last one.
+            ("rapid", config(host, PASSWORD, "/out/rapid/data"),
+             "modemhealth check >/dev/null; modemhealth check >/dev/null; modemhealth check >/dev/null"),
+            # The router's clock stepped back a minute since the last check
+            # (simulated by a last check made a minute in the future).
+            ("clock_back", config(host, PASSWORD, "/out/clock_back/data"),
+             "f=$(( $(date +%%s) * 1000 + 60000 )); echo $f > /var/run/modemhealth/last_ms; "
+             "curl -sk \"https://modem:%d/_control/set?last_ts=$f\" >/dev/null" % PORT),
         ])
 
         # ------------------------------------------------------------ good
@@ -189,6 +197,20 @@ def main():
         check(state["login_failures"] == 1 and state["status_reads"] == 0, "wrong_password: no status read after a refused login")
         state = json.load(open(os.path.join(out, "no_password", "modem_state.json")))
         check(state["requests"] == 0, "no_password: the modem is not contacted")
+
+        # ------------------------------------------------------- timestamps
+        d = os.path.join(out, "rapid")
+        readings = read_csv(os.path.join(d, "data", "readings.csv"))
+        state = json.load(open(os.path.join(d, "modem_state.json")))
+        check([r["result"] for r in readings] == ["ok"] * 4, "rapid: four back-to-back checks all ok")
+        check(state["stale_timestamps"] == 0, "rapid: no timestamp ever went backwards")
+        d = os.path.join(out, "clock_back")
+        readings = read_csv(os.path.join(d, "data", "readings.csv"))
+        state = json.load(open(os.path.join(d, "modem_state.json")))
+        check(len(readings) == 1 and readings[0]["result"] == "ok" and state["stale_timestamps"] == 0,
+              "clock_back: check still ok after the router clock went back (got %s)" % (readings[0]["reason"] if readings else "none"))
+        good_state = json.load(open(os.path.join(out, "good", "modem_state.json")))
+        check(good_state["stale_timestamps"] == 0, "good: no stale timestamps")
 
         # ----------------------------------------------------------- secrecy
         for name in ("good", "wrong_password", "unreachable"):

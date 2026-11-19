@@ -43,11 +43,22 @@ hmac() { # $1=key $2=message -> uppercase hex HMAC-SHA256
 	printf '%s' "$2" | openssl dgst -sha256 -hmac "$1" 2>/dev/null | sed 's/^.*= *//' | tr 'abcdef' 'ABCDEF'
 }
 
-now_ms() { # the modem's web page sends Date.now() % 2000000000000
-	local up cs
-	read -r up _ < /proc/uptime
-	cs=${up#*.}
-	echo $(( $(date +%s)${cs}0 % 2000000000000 ))
+# The HNAP_AUTH timestamp. The modem's web page sends Date.now() %
+# 2000000000000, and the modem answers 403 to any request whose timestamp is
+# lower than one it has already accepted (an equal one is fine; checked on a
+# real S34). So: real milliseconds from ucode's clock() where available
+# (busybox date has none), and never lower than the previous timestamp,
+# which is kept in RAM across checks.
+now_ms() {
+	local ms last
+	ms=$(ucode -e 'let c = clock(); print(c[0] * 1000 + int(c[1] / 1000000));' 2>/dev/null)
+	case $ms in ''|*[!0-9]*) ms=$(( $(date +%s) * 1000 )) ;; esac
+	ms=$(( ms % 2000000000000 ))
+	read -r last 2>/dev/null < "$RUN_DIR/last_ms"
+	case $last in ''|*[!0-9]*) last=0 ;; esac
+	[ "$ms" -gt "$last" ] || ms=$(( last + 1 ))
+	echo "$ms" > "$RUN_DIR/last_ms"
+	echo "$ms"
 }
 
 # hnap ACTION BODY OUTFILE -> sets HTTP_CODE; returns curl's exit code

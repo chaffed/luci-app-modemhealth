@@ -13,6 +13,7 @@ Control endpoints (plain GET on the same port) for tests:
                                 password=...    the modem password
                                 expire=1        forget all sessions now
                                 session_limit=N sessions expire after N requests
+                                last_ts=N       latest timestamp already accepted
     /_control/reset             counters back to zero, defaults restored
 
 Usage: python3 tests/fake_modem.py --port 18443 --password 'secret'
@@ -70,9 +71,10 @@ class Modem:
         self.pending = {}  # cookie -> (challenge, public key) between login steps
         self.sessions = {}  # cookie -> {"key": PrivateKey, "used": n}
         self.session_limit = 0
+        self.last_ts = 0
         self.counts = {"requests": 0, "logins": 0, "login_failures": 0,
                        "bad_signatures": 0, "status_reads": 0, "logouts": 0,
-                       "unauthorised": 0}
+                       "unauthorised": 0, "stale_timestamps": 0}
 
     def state(self):
         return dict(self.counts, sessions=len(self.sessions))
@@ -112,6 +114,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         m.sessions.clear()
                     elif key == "session_limit":
                         m.session_limit = int(value)
+                    elif key == "last_ts":
+                        m.last_ts = int(value)
                 return self.reply(200, m.state())
         # The real modem sends every other page to the login page.
         self.send_response(302)
@@ -152,6 +156,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
             auth = self.headers.get("HNAP_AUTH", "")
             sig, _, ts = auth.partition(" ")
+            # The real S34 answers 403 to a timestamp lower than one it has
+            # already accepted; an equal one is fine.
+            if ts.isdigit() and int(ts) < m.last_ts:
+                m.counts["stale_timestamps"] += 1
+                return self.reply(403, {})
+            if ts.isdigit():
+                m.last_ts = int(ts)
             if pending and ts and sig != sign(key, ts + soap_action):
                 m.pending.pop(cookies.get("uid", ""), None)
                 m.counts["login_failures"] += 1
