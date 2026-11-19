@@ -6,6 +6,17 @@
 #   modemhealth last         print the latest stored reading
 #   modemhealth logout       end the modem session kept between checks
 #   modemhealth daemon       check on schedule (started by /etc/init.d/modemhealth)
+#   modemhealth status       state, last reading and modem identity, as JSON
+#   modemhealth data SINCE [UNTIL]
+#                            stored readings, channels, events and line-up
+#                            between two times (epoch seconds), as JSON
+#   modemhealth test         try logging in with MH_HOST, MH_USER and
+#                            MH_PASSWORD (environment; empty = saved), as JSON
+#   modemhealth set-password read a new modem password from stdin and save it
+#
+# The password is kept in /etc/config/modemhealth_auth (root only), apart
+# from the other settings, so that the web pages, which load the whole
+# settings file, never receive it.
 #
 # Supported modems: ARRIS/Vantiva SURFboard S33 and S34 (HNAP, HMAC-SHA256).
 # The modem reader (the "modem_*" functions) only logs in and turns replies
@@ -31,12 +42,16 @@ clean() { printf '%s' "$*" | tr -d '\000-\037",\\<>' | cut -c1-120; }
 
 int_or() { case "$1" in ''|*[!0-9]*) echo "$2" ;; *) echo "$1" ;; esac; }
 
-json_str() { printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
+json_str() { printf '"%s"' "$(printf '%s' "$1" | tr -d '\000-\037' | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
+json_num() { case "$1" in ''|*[!0-9.-]*) printf null ;; *) printf '%s' "$1" ;; esac; }
+json_bool() { if "$@"; then printf true; else printf false; fi; }
 
 load_config() {
 	HOST=$(uci -q get "$CONFIG.main.host"); HOST=${HOST:-192.168.100.1}
 	USERNAME=$(uci -q get "$CONFIG.main.username"); USERNAME=${USERNAME:-admin}
-	PASSWORD=$(uci -q get "$CONFIG.main.password")
+	PASSWORD=$(uci -q get "$CONFIG"_auth.main.password)
+	# Before 0.1.0-r2 the password was kept with the other settings.
+	[ -n "$PASSWORD" ] || PASSWORD=$(uci -q get "$CONFIG.main.password")
 	DATA_DIR=$(uci -q get "$CONFIG.main.data_dir"); DATA_DIR=${DATA_DIR:-/etc/modemhealth}
 	TIMEOUT=$(uci -q get "$CONFIG.main.timeout"); TIMEOUT=${TIMEOUT:-15}
 	ENABLED=$(uci -q get "$CONFIG.main.enabled"); ENABLED=${ENABLED:-1}
@@ -153,7 +168,10 @@ session_load() {
 	[ -s "$RUN_DIR/session" ] || return 1
 	# Settings changed since the session began: it may be for another
 	# modem, user or password.
-	if [ /etc/config/$CONFIG -nt "$RUN_DIR/session" ]; then session_drop; return 1; fi
+	if [ /etc/config/$CONFIG -nt "$RUN_DIR/session" ] || [ /etc/config/${CONFIG}_auth -nt "$RUN_DIR/session" ]; then
+		session_drop
+		return 1
+	fi
 	{ read -r PRIVATE_KEY; read -r SESSION_UID; } < "$RUN_DIR/session"
 	[ -n "$PRIVATE_KEY" ] && [ -n "$SESSION_UID" ] && return 0
 	session_drop
@@ -556,6 +574,117 @@ do_daemon() {
 	done
 }
 
+# --------------------------------------------------------- web interface
+
+# Rows of one kind of daily file (readings, channels, events) with
+# SINCE <= first column <= UNTIL, without headers. Only the days that can
+# hold such rows are opened.
+rows_between() { # $1=kind $2=since $3=until
+	local f day from to
+	from=$(date -d "@$(( $2 - 86400 ))" +%Y%m%d 2>/dev/null || echo 0)
+	to=$(date -d "@$(( $3 + 86400 ))" +%Y%m%d 2>/dev/null || echo 99999999)
+	for f in "$DATA_DIR/$1"/*.csv.gz "$DATA_DIR/$1"/*.csv; do
+		[ -e "$f" ] || continue
+		day=${f##*/}; day=$(echo "${day%%.*}" | tr -d -)
+		case $day in *[!0-9]*|'') continue ;; esac
+		[ "$day" -ge "$from" ] && [ "$day" -le "$to" ] || continue
+		case $f in *.gz) gzip -dc "$f" ;; *) cat "$f" ;; esac | tail -n +2
+	done | awk -F, -v s="$2" -v u="$3" '$1 + 0 >= s && $1 + 0 <= u'
+}
+
+# stdin -> a JSON string
+json_text() {
+	awk 'BEGIN { printf "\"" } { gsub(/\\/, "\\\\"); gsub(/"/, "\\\""); gsub(/[\001-\037]/, ""); printf "%s\\n", $0 } END { printf "\"" }'
+}
+
+do_data() {
+	load_config
+	local since until k
+	since=$(int_or "$1" 0); until=$(int_or "$2" "$(date +%s)")
+	printf '{"since":%s,"until":%s' "$since" "$until"
+	for k in readings channels events; do
+		printf ',"%s":' "$k"
+		{
+			case $k in readings) echo "$READINGS_HEADER" ;; channels) echo "$CHANNELS_HEADER" ;; events) echo "$EVENTS_HEADER" ;; esac
+			rows_between "$k" "$since" "$until"
+		} | json_text
+	done
+	# The whole line-up history is small; the page picks what applies.
+	printf ',"channelmap":'
+	cat "$DATA_DIR/channelmap.csv" 2>/dev/null | json_text
+	echo '}'
+}
+
+do_status() {
+	load_config
+	local pid sched=false next="" last="" k v first=1
+	pid=$(pgrep -f '/usr/bin/modemhealth daemon' 2>/dev/null | head -n 1)
+	[ "$ENABLED" = 1 ] && [ -n "$pid" ] && sched=true
+	next=$(cat "$RUN_DIR/next" 2>/dev/null)
+	last=$(all_readings | tail -n 1)
+	printf '{"enabled":%s,"scheduler":%s,"synced":%s,"next_check":%s,"interval":%s,"now":%s,' \
+		"$(json_bool [ "$ENABLED" = 1 ])" "$sched" "$(json_bool time_synced)" "$(json_num "$next")" "$INTERVAL" "$(date +%s)"
+	printf '"password_set":%s,"host":%s,"username":%s,"readings_header":%s,"last":%s,"modem":{' \
+		"$(json_bool [ -n "$PASSWORD" ])" "$(json_str "$HOST")" "$(json_str "$USERNAME")" "$(json_str "$READINGS_HEADER")" "$(json_str "$last")"
+	if [ -s "$DATA_DIR/modem.txt" ]; then
+		while IFS='=' read -r k v; do
+			[ -n "$k" ] || continue
+			[ $first = 1 ] || printf ','
+			first=0
+			printf '%s:%s' "$(json_str "$k")" "$(json_str "$v")"
+		done < "$DATA_DIR/modem.txt"
+	fi
+	echo '}}'
+}
+
+# Log in with the settings in the environment (the Settings page sends what
+# is typed, before it is saved) and read the status once, without storing
+# anything or touching the kept session.
+do_test() {
+	local ds us
+	load_config
+	HOST=${MH_HOST:-$HOST}; USERNAME=${MH_USER:-$USERNAME}
+	[ -n "$MH_PASSWORD" ] && PASSWORD=$MH_PASSWORD
+	BASE="https://$HOST"
+	RUN_DIR=$(mktemp -d /tmp/modemhealth-test.XXXXXX) || return 1
+	chmod 700 "$RUN_DIR"
+	# Timestamps must never go below what the modem has already seen.
+	cp /var/run/modemhealth/last_ms "$RUN_DIR/" 2>/dev/null
+	FAIL_REASON=
+	if modem_login && modem_read_status; then
+		ds=$(status_field GetCustomerStatusDownstreamChannelInfo CustomerConnDownstreamChannel | awk -F'\\|\\+\\|' '{ print NF - ($0 ~ /\|\+\|$/) }')
+		us=$(status_field GetCustomerStatusUpstreamChannelInfo CustomerConnUpstreamChannel | awk -F'\\|\\+\\|' '{ print NF - ($0 ~ /\|\+\|$/) }')
+		printf '{"ok":true,"model":%s,"firmware":%s,"downstream":%s,"upstream":%s}\n' \
+			"$(json_str "$(clean "$(status_field GetCustomerStatusSoftware StatusSoftwareModelName)")")" \
+			"$(json_str "$(clean "$(status_field GetCustomerStatusSoftware StatusSoftwareSfVer)")")" \
+			"$(json_num "$ds")" "$(json_num "$us")"
+		modem_logout
+	else
+		printf '{"ok":false,"reason":%s}\n' "$(json_str "$FAIL_REASON")"
+	fi
+	cp "$RUN_DIR/last_ms" /var/run/modemhealth/ 2>/dev/null
+	rm -rf "$RUN_DIR"
+}
+
+do_set_password() {
+	local pw
+	IFS= read -r pw || [ -n "$pw" ] || pw=""
+	touch /etc/config/${CONFIG}_auth
+	chmod 600 /etc/config/${CONFIG}_auth
+	uci -q get "${CONFIG}_auth.main" >/dev/null || uci set "${CONFIG}_auth.main=auth"
+	uci set "${CONFIG}_auth.main.password=$pw"
+	uci commit "${CONFIG}_auth"
+	chmod 600 /etc/config/${CONFIG}_auth
+	# Remove a password kept with the other settings by older versions.
+	if [ -n "$(uci -q get "$CONFIG.main.password")" ]; then
+		uci -q delete "$CONFIG.main.password"
+		uci commit "$CONFIG"
+	fi
+	load_config
+	session_drop
+	echo '{"ok":true}'
+}
+
 # MODEMHEALTH_LIB=1: only define the functions (for probes and tests).
 [ "${MODEMHEALTH_LIB:-}" = 1 ] && return 0 2>/dev/null
 
@@ -565,8 +694,12 @@ case "$1" in
 	last) do_last ;;
 	logout) do_logout ;;
 	daemon) do_daemon ;;
+	status) do_status ;;
+	data) do_data "$2" "$3" ;;
+	test) do_test ;;
+	set-password) do_set_password ;;
 	*)
-		echo "usage: modemhealth check|history [N]|last|logout|daemon" >&2
+		echo "usage: modemhealth check|history [N]|last|logout|daemon|status|data SINCE [UNTIL]|test|set-password" >&2
 		exit 2
 		;;
 esac
