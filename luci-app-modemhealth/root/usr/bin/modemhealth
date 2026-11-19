@@ -18,7 +18,7 @@ CONFIG=modemhealth
 HNAP_NS='http://purenetworks.com/HNAP1/'
 STATUS_ACTIONS='GetCustomerStatusStartupSequence GetCustomerStatusConnectionInfo GetCustomerStatusDownstreamChannelInfo GetCustomerStatusUpstreamChannelInfo GetCustomerStatusSoftware GetCustomerStatusLog'
 # Stored per day, in DATA_DIR/readings/ and DATA_DIR/channels/ (see storage).
-READINGS_HEADER='ts,result,reason,model,firmware,uptime_s,connectivity,boot,network_access,modem_time,ds_channels,us_channels,reboot,boot_ts,clock_offset_s'
+READINGS_HEADER='ts,result,reason,model,firmware,uptime_s,connectivity,boot,network_access,modem_time,ds_channels,us_channels,reboot,boot_ts,clock_offset_s,modem_ping_loss,modem_ping_ms,inet_ping_loss,inet_ping_ms'
 EVENTS_HEADER='first_seen_ts,modem_time,clock_offset_s,level,message'
 CHANNELS_HEADER='ts,dir,channel_id,lock,power_dbmv,snr_db,corrected,uncorrectable'
 CHANNELMAP_HEADER='ts,dir,ch,channel_id,modulation,freq_hz,width_hz'
@@ -42,6 +42,7 @@ load_config() {
 	ENABLED=$(uci -q get "$CONFIG.main.enabled"); ENABLED=${ENABLED:-1}
 	INTERVAL=$(int_or "$(uci -q get "$CONFIG.main.interval")" 5)
 	[ "$INTERVAL" -ge 1 ] || INTERVAL=1
+	PING_HOST=$(uci -q get "$CONFIG.main.ping_host"); PING_HOST=${PING_HOST:-1.1.1.1}
 	HISTORY_DAYS=$(int_or "$(uci -q get "$CONFIG.main.history_days")" 90)
 	[ "$HISTORY_DAYS" -ge 1 ] || HISTORY_DAYS=1
 	RUN_DIR=${MODEMHEALTH_RUN_DIR:-/var/run/modemhealth}
@@ -264,7 +265,28 @@ ensure_store() {
 }
 
 store_failed() { # $1=ts $2=reason
-	echo "$1,failed,$(clean "$2"),,,,,,,,,,,," >> "$READINGS"
+	echo "$1,failed,$(clean "$2"),,,,,,,,,,,,,$PINGS" >> "$READINGS"
+}
+
+# ping_stats HOST -> "loss_percent,average_ms" (3 pings; "100," if none came back)
+ping_stats() {
+	ping -c 3 -W 2 -q "$1" 2>/dev/null | awk '
+		/packet loss/ { for (i = 1; i <= NF; i++) if ($i ~ /%$/) { loss = $i; sub(/%/, "", loss) } }
+		/min\/avg\/max/ { split($0, a, "= "); split(a[2], v, "/"); avg = v[2] }
+		END { printf "%s,%s", (loss == "" ? 100 : loss), avg }'
+}
+
+# Pings the modem and an internet host at the same time; sets PINGS to
+# "modem_loss,modem_ms,inet_loss,inet_ms". Done on every check, failed
+# readings included: with the modem unreachable and the internet down,
+# these are what show an outage.
+measure_pings() {
+	local host=${HOST%%:*}
+	ping_stats "$host" > "$RUN_DIR/ping.modem" &
+	ping_stats "$PING_HOST" > "$RUN_DIR/ping.inet"
+	wait
+	PINGS="$(cat "$RUN_DIR/ping.modem"),$(cat "$RUN_DIR/ping.inet")"
+	rm -f "$RUN_DIR/ping.modem" "$RUN_DIR/ping.inet"
 }
 
 # Gzip the days before today, and remove days older than HISTORY_DAYS.
@@ -385,6 +407,7 @@ do_check() {
 	tidy_store
 	ts=$(date +%s)
 	FAIL_REASON=
+	measure_pings
 
 	if ! modem_read_with_session; then
 		[ "$FAIL_REASON" = login_refused ] && session_drop
@@ -420,7 +443,7 @@ do_check() {
 	echo "$ts ${uptime:-0}" > "$DATA_DIR/last.new"
 	[ -n "$rows" ] && store_channels "$ts" "$reboot" "$rows"
 	mv -f "$DATA_DIR/last.new" "$DATA_DIR/last"
-	echo "$ts,ok,,$model,$firmware,$uptime,$(clean "$(status_field GetCustomerStatusStartupSequence CustomerConnConnectivityComment)"),$(clean "$(status_field GetCustomerStatusStartupSequence CustomerConnBootComment)"),$(clean "$(status_field GetCustomerStatusConnectionInfo CustomerConnNetworkAccess)"),$modem_time,$ds_n,$us_n,$reboot,$boot_ts,$offset" >> "$READINGS"
+	echo "$ts,ok,,$model,$firmware,$uptime,$(clean "$(status_field GetCustomerStatusStartupSequence CustomerConnConnectivityComment)"),$(clean "$(status_field GetCustomerStatusStartupSequence CustomerConnBootComment)"),$(clean "$(status_field GetCustomerStatusConnectionInfo CustomerConnNetworkAccess)"),$modem_time,$ds_n,$us_n,$reboot,$boot_ts,$offset,$PINGS" >> "$READINGS"
 
 	# What identifies the modem to the ISP; overwritten on every good reading.
 	{

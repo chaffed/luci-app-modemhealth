@@ -123,6 +123,26 @@ eq(pv.level, 'failing', 'S34: the two hours of the capture are failing');
 ok(pv.reasons.some(function(r) { return r.kind === 'sync_loss' && r.level === 'bad'; }), 'S34: losses of sync are a reason');
 ok(pv.reasons.some(function(r) { return r.kind === 't4'; }), 'S34: the T4 time-out is a reason');
 
+/* ------------------------------------------------------------- outages */
+function R(ts, inet, modem, extra) { return Object.assign({ ts: String(ts), result: 'ok', inet_ping_loss: String(inet), modem_ping_loss: String(modem) }, extra || {}); }
+var T = 1795000000;
+var o = H.outages([ R(T, 0, 0), R(T + 300, 100, 0), R(T + 600, 100, 0), R(T + 900, 0, 0) ]);
+eq(o.length, 1, 'outages: two consecutive down checks are one outage');
+eq([ o[0].start, o[0].end, o[0].before, o[0].after, o[0].minS, o[0].maxS, o[0].checks, o[0].kind, o[0].ongoing ],
+	[ T + 300, T + 600, T, T + 900, 300, 900, 2, 'line_down', false ],
+	'outages: lasted at least 5 and at most 15 minutes (between the good checks around it); modem answered: line down');
+eq(H.outages([ R(T, 0, 0), R(T + 300, 33, 0), R(T + 600, 67, 0), R(T + 900, 0, 0) ]).length, 0, 'outages: one or two lost pings are not an outage');
+o = H.outages([ R(T, 0, 0), R(T + 300, 100, 100, { result: 'failed', reason: 'unreachable' }), R(T + 600, 100, 0) ]);
+eq([ o.length, o[0].kind, o[0].ongoing, o[0].after, o[0].maxS ], [ 1, 'modem_unreachable', true, null, null ],
+	'outages: the modem stopped answering too: modem unreachable; still down at the last check: ongoing, end unknown');
+o = H.outages([ R(T, 0, 0), R(T + 300, 100, 0), R(T + 300 + 7200, 100, 0), R(T + 7800, 0, 0) ]);
+eq(o.map(function(x) { return [ x.start, x.end, x.ongoing ]; }), [ [ T + 300, T + 300, false ], [ T + 7500, T + 7500, false ] ],
+	'outages: two hours without checks in between: counted as two outages, not one long one');
+eq([ o[1].before, o[1].maxS ], [ null, null ], 'outages: no good check shortly before: the longest duration is unknown');
+eq(H.outages([ R(T, 0, 0), R(T + 300, '', '', { result: 'failed', reason: 'no_password' }) ]).length, 0,
+	'outages: a check without ping results is not an outage');
+eq(H.outages([ R(T + 600, 0, 0), R(T + 300, 100, 0), R(T, 0, 0) ]).length, 1, 'outages: readings in any order');
+
 /* --------------------------------------------------- quiet line is healthy */
 var quiet = H.periodVerdict({ hours: 24 * 7, readings: new Array(2016).fill({ level: 'healthy' }), events: [], reboots: 0, outages: [] });
 eq(quiet.level, 'healthy', 'a week of good readings with no events is healthy');
