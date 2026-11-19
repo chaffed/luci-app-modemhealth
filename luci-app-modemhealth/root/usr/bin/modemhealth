@@ -1,9 +1,11 @@
 #!/bin/sh
 # Modem Health: read a cable modem's status and keep it as evidence.
 #
-#   modemhealth check   read the modem once and store the reading
-#   modemhealth last    print the latest stored reading
-#   modemhealth logout  end the modem session kept between checks
+#   modemhealth check        read the modem once and store the reading
+#   modemhealth history [N]  print the last N readings (default 12)
+#   modemhealth last         print the latest stored reading
+#   modemhealth logout       end the modem session kept between checks
+#   modemhealth daemon       check on schedule (started by /etc/init.d/modemhealth)
 #
 # Supported modems: ARRIS/Vantiva SURFboard S33 and S34 (HNAP, HMAC-SHA256).
 # The modem reader (the "modem_*" functions) only logs in and turns replies
@@ -15,14 +17,18 @@
 CONFIG=modemhealth
 HNAP_NS='http://purenetworks.com/HNAP1/'
 STATUS_ACTIONS='GetCustomerStatusStartupSequence GetCustomerStatusConnectionInfo GetCustomerStatusDownstreamChannelInfo GetCustomerStatusUpstreamChannelInfo GetCustomerStatusSoftware'
-READINGS_HEADER='ts,result,reason,model,firmware,uptime_s,connectivity,boot,network_access,modem_time,ds_channels,us_channels'
-CHANNELS_HEADER='ts,dir,ch,lock,modulation,channel_id,freq_hz,width_hz,power_dbmv,snr_db,corrected,uncorrectable'
+# Stored per day, in DATA_DIR/readings/ and DATA_DIR/channels/ (see storage).
+READINGS_HEADER='ts,result,reason,model,firmware,uptime_s,connectivity,boot,network_access,modem_time,ds_channels,us_channels,reboot,boot_ts'
+CHANNELS_HEADER='ts,dir,channel_id,lock,power_dbmv,snr_db,corrected,uncorrectable'
+CHANNELMAP_HEADER='ts,dir,ch,channel_id,modulation,freq_hz,width_hz'
 
 log() { logger -t modemhealth "$*" 2>/dev/null; [ -t 2 ] && echo "modemhealth: $*" >&2; return 0; }
 
 # Text from the modem goes into CSV files and, later, web pages: keep it to
 # printable characters without the CSV and HTML specials.
 clean() { printf '%s' "$*" | tr -d '\000-\037",\\<>' | cut -c1-120; }
+
+int_or() { case "$1" in ''|*[!0-9]*) echo "$2" ;; *) echo "$1" ;; esac; }
 
 json_str() { printf '"%s"' "$(printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g')"; }
 
@@ -32,6 +38,11 @@ load_config() {
 	PASSWORD=$(uci -q get "$CONFIG.main.password")
 	DATA_DIR=$(uci -q get "$CONFIG.main.data_dir"); DATA_DIR=${DATA_DIR:-/etc/modemhealth}
 	TIMEOUT=$(uci -q get "$CONFIG.main.timeout"); TIMEOUT=${TIMEOUT:-15}
+	ENABLED=$(uci -q get "$CONFIG.main.enabled"); ENABLED=${ENABLED:-1}
+	INTERVAL=$(int_or "$(uci -q get "$CONFIG.main.interval")" 5)
+	[ "$INTERVAL" -ge 1 ] || INTERVAL=1
+	HISTORY_DAYS=$(int_or "$(uci -q get "$CONFIG.main.history_days")" 90)
+	[ "$HISTORY_DAYS" -ge 1 ] || HISTORY_DAYS=1
 	RUN_DIR=${MODEMHEALTH_RUN_DIR:-/var/run/modemhealth}
 	BASE="https://$HOST"
 }
@@ -221,24 +232,110 @@ channel_rows() {
 }
 
 # --------------------------------------------------------------------- storage
+#
+# DATA_DIR (flash, kept across firmware upgrades):
+#   readings/YYYY-MM-DD.csv   one row per check, failed checks included
+#   channels/YYYY-MM-DD.csv   one row per channel per good check: power,
+#                             SNR/MER, and the corrected and uncorrectable
+#                             errors since the previous good check
+#   channelmap.csv            the channel line-up (modulation, frequency,
+#                             width), written only when it changes
+#   modem.txt                 model, firmware, MAC: what the ISP needs
+#   last                      previous good check: time, uptime, counters
+# Days before today are gzipped, and days older than history_days removed.
+# 90 days at 5-minute checks with ~40 channels is about 4-8 MB.
+
+today() { date +%Y-%m-%d; }
 
 ensure_store() {
-	mkdir -p "$DATA_DIR" || return 1
-	[ -s "$DATA_DIR/readings.csv" ] || echo "$READINGS_HEADER" > "$DATA_DIR/readings.csv"
-	[ -s "$DATA_DIR/channels.csv" ] || echo "$CHANNELS_HEADER" > "$DATA_DIR/channels.csv"
+	mkdir -p "$DATA_DIR/readings" "$DATA_DIR/channels" || return 1
+	DAY=$(today)
+	READINGS="$DATA_DIR/readings/$DAY.csv"
+	CHANNELS="$DATA_DIR/channels/$DAY.csv"
+	[ -s "$READINGS" ] || echo "$READINGS_HEADER" > "$READINGS"
+	[ -s "$CHANNELS" ] || echo "$CHANNELS_HEADER" > "$CHANNELS"
+	[ -s "$DATA_DIR/channelmap.csv" ] || echo "$CHANNELMAP_HEADER" > "$DATA_DIR/channelmap.csv"
 }
 
 store_failed() { # $1=ts $2=reason
-	echo "$1,failed,$(clean "$2"),,,,,,,,," >> "$DATA_DIR/readings.csv"
+	echo "$1,failed,$(clean "$2"),,,,,,,,,,," >> "$READINGS"
+}
+
+# Gzip the days before today, and remove days older than HISTORY_DAYS.
+tidy_store() {
+	local cutoff f name
+	cutoff=$(date -d "@$(( $(date +%s) - HISTORY_DAYS * 86400 ))" +%Y%m%d 2>/dev/null) || return 0
+	for f in "$DATA_DIR"/readings/*.csv* "$DATA_DIR"/channels/*.csv*; do
+		[ -e "$f" ] || continue
+		name=${f##*/}; name=${name%%.*}
+		case $name in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;; *) continue ;; esac
+		if [ "$(echo "$name" | tr -d -)" -lt "$cutoff" ]; then
+			rm -f "$f"
+		elif [ "$name" != "$DAY" ] && [ "${f%.gz}" = "$f" ]; then
+			gzip -f "$f"
+		fi
+	done
+}
+
+# Previous good check, from DATA_DIR/last:
+#   line 1: "ts uptime"; then "dir,channel_id,corrected,uncorrectable" totals.
+read_last() {
+	PREV_TS=; PREV_UPTIME=
+	[ -s "$DATA_DIR/last" ] || return 1
+	read -r PREV_TS PREV_UPTIME < "$DATA_DIR/last"
+	PREV_TS=$(int_or "$PREV_TS" ""); PREV_UPTIME=$(int_or "$PREV_UPTIME" "")
+	[ -n "$PREV_TS" ] && [ -n "$PREV_UPTIME" ]
+}
+
+# Store the channels of a good check. $1=ts $2=reboot(0/1) $3=full rows
+# (ts,dir,ch,lock,modulation,channel_id,freq_hz,width_hz,power,snr,corrected,uncorrectable).
+# The modem's error counters run since its last restart, so each row stores
+# the change since the previous good check: after a restart, or when a
+# counter went down, the change is the new count itself; with no earlier
+# check for the channel it is left empty (unknown), never guessed.
+store_channels() {
+	local ts=$1 reboot=$2 rows=$3 map
+	printf '%s\n' "$rows" | awk -F, -v reboot="$reboot" -v last="$DATA_DIR/last" -v state="$DATA_DIR/last.new" -v out="$CHANNELS" '
+		BEGIN {
+			# line 1 of "last" is "ts uptime"; then dir,channel_id,corrected,uncorrectable
+			n = 0
+			while ((getline line < last) > 0) {
+				if (++n == 1) continue
+				split(line, p, ",")
+				prev[p[1] "," p[2]] = p[3]; prevu[p[1] "," p[2]] = p[4]
+			}
+			close(last)
+		}
+		$0 == "" { next }
+		{
+			k = $2 "," $6; dc = ""; du = ""
+			if ($2 == "ds" && $11 != "") {
+				if (reboot == 1) { dc = $11; du = $12 }
+				else if (k in prev) {
+					dc = ($11 + 0 >= prev[k] + 0) ? $11 - prev[k] : $11
+					du = ($12 + 0 >= prevu[k] + 0) ? $12 - prevu[k] : $12
+				}
+				print k "," $11 "," $12 >> state
+			}
+			print $1 "," $2 "," $6 "," $4 "," $9 "," $10 "," dc "," du >> out
+		}'
+
+	# The line-up is stored only when it changes.
+	map=$(printf '%s\n' "$rows" | awk -F, 'NF { print $2 "," $3 "," $6 "," $5 "," $7 "," $8 }')
+	if [ "$map" != "$(cat "$DATA_DIR/channelmap.last" 2>/dev/null)" ]; then
+		printf '%s\n' "$map" | awk -v ts="$ts" 'NF { print ts "," $0 }' >> "$DATA_DIR/channelmap.csv"
+		printf '%s\n' "$map" > "$DATA_DIR/channelmap.last"
+	fi
 }
 
 # ---------------------------------------------------------------------- check
 
 do_check() {
-	local ts rows ds us ds_n us_n uptime model firmware
+	local ts rows ds us ds_n us_n uptime model firmware reboot=0 boot_ts=""
 	load_config
 	mkdir -p "$RUN_DIR" && chmod 700 "$RUN_DIR"
 	ensure_store || { log "cannot write to $DATA_DIR"; return 1; }
+	tidy_store
 	ts=$(date +%s)
 	FAIL_REASON=
 
@@ -260,8 +357,19 @@ do_check() {
 	model=$(clean "$(status_field GetCustomerStatusSoftware StatusSoftwareModelName)")
 	firmware=$(clean "$(status_field GetCustomerStatusSoftware StatusSoftwareSfVer)")
 
-	[ -n "$rows" ] && printf '%s\n' "$rows" >> "$DATA_DIR/channels.csv"
-	echo "$ts,ok,,$model,$firmware,$uptime,$(clean "$(status_field GetCustomerStatusStartupSequence CustomerConnConnectivityComment)"),$(clean "$(status_field GetCustomerStatusStartupSequence CustomerConnBootComment)"),$(clean "$(status_field GetCustomerStatusConnectionInfo CustomerConnNetworkAccess)"),$(clean "$(status_field GetCustomerStatusConnectionInfo CustomerCurSystemTime)"),$ds_n,$us_n" >> "$DATA_DIR/readings.csv"
+	# A restart: the modem has been up for less time than has passed since
+	# the previous good check (two minutes' grace for clock jitter).
+	if [ -n "$uptime" ] && read_last && [ "$ts" -ge "$PREV_TS" ] \
+		&& [ $(( uptime + 120 )) -lt $(( PREV_UPTIME + ts - PREV_TS )) ]; then
+		reboot=1
+		boot_ts=$(( ts - uptime ))
+		log "modem restarted at $(date -d "@$boot_ts" '+%Y-%m-%d %H:%M:%S' 2>/dev/null)"
+	fi
+
+	echo "$ts ${uptime:-0}" > "$DATA_DIR/last.new"
+	[ -n "$rows" ] && store_channels "$ts" "$reboot" "$rows"
+	mv -f "$DATA_DIR/last.new" "$DATA_DIR/last"
+	echo "$ts,ok,,$model,$firmware,$uptime,$(clean "$(status_field GetCustomerStatusStartupSequence CustomerConnConnectivityComment)"),$(clean "$(status_field GetCustomerStatusStartupSequence CustomerConnBootComment)"),$(clean "$(status_field GetCustomerStatusConnectionInfo CustomerConnNetworkAccess)"),$(clean "$(status_field GetCustomerStatusConnectionInfo CustomerCurSystemTime)"),$ds_n,$us_n,$reboot,$boot_ts" >> "$READINGS"
 
 	# What identifies the modem to the ISP; overwritten on every good reading.
 	{
@@ -269,10 +377,10 @@ do_check() {
 		echo "firmware=$firmware"
 		echo "mac=$(clean "$(status_field GetCustomerStatusSoftware StatusSoftwareMac)")"
 		echo "docsis=$(clean "$(status_field GetCustomerStatusSoftware StatusSoftwareCustomerVer)")"
-	} > "$DATA_DIR/modem.txt"
+	} > "$DATA_DIR/modem.txt.new" && mv -f "$DATA_DIR/modem.txt.new" "$DATA_DIR/modem.txt"
 
 	rm -f "$RUN_DIR/status.json"
-	echo "ok: $model, $ds_n downstream and $us_n upstream channels, up ${uptime}s"
+	echo "ok: $model, $ds_n downstream and $us_n upstream channels, up ${uptime}s$([ $reboot = 1 ] && echo ', restarted since the last check')"
 }
 
 do_logout() {
@@ -282,10 +390,96 @@ do_logout() {
 	session_drop
 }
 
+# All stored readings, oldest first, without headers.
+all_readings() {
+	local f
+	for f in "$DATA_DIR"/readings/*.csv.gz "$DATA_DIR"/readings/*.csv; do
+		[ -e "$f" ] || continue
+		case $f in *.gz) gzip -dc "$f" ;; *) cat "$f" ;; esac | tail -n +2
+	done
+}
+
 do_last() {
 	load_config
-	[ -s "$DATA_DIR/readings.csv" ] || { echo "no readings yet"; return 1; }
-	tail -n 1 "$DATA_DIR/readings.csv"
+	local r
+	r=$(all_readings | tail -n 1)
+	[ -n "$r" ] || { echo "no readings yet"; return 1; }
+	echo "$r"
+}
+
+do_history() {
+	load_config
+	all_readings | tail -n "$(int_or "$1" 12)" | awk -F, '{
+		cmd = "date -d @" $1 " \"+%Y-%m-%d %H:%M:%S\""; cmd | getline when; close(cmd)
+		if ($2 == "ok")
+			printf "%s  ok      up %dd %02dh%02dm  %s ds / %s us%s\n", when, $6 / 86400, ($6 % 86400) / 3600, ($6 % 3600) / 60, $11, $12, ($13 == 1 ? "  RESTARTED" : "")
+		else
+			printf "%s  FAILED  %s\n", when, $3
+	}'
+}
+
+# --------------------------------------------------------------------- daemon
+
+uptime_s() { local u; read -r u _ < /proc/uptime; echo "${u%.*}"; }
+
+# Interruptible sleep (lets the TERM trap run straight away).
+nap() { sleep "$1" & SLEEP_PID=$!; wait "$SLEEP_PID"; }
+
+# The router has no battery-backed clock: until NTP has set the time a
+# reading would carry the wrong date, which is worthless as evidence. The
+# ntp hotplug (shipped with dnsmasq) leaves a flag once the time is valid;
+# without that flag, give NTP ten minutes.
+time_synced() {
+	[ -e /var/state/dnsmasqsec ] && return 0
+	[ "$(uptime_s)" -ge 600 ]
+}
+
+# Up to 20 seconds, so checks don't always land on the same second.
+jitter() { awk 'BEGIN { srand(); print int(rand() * 20) }'; }
+
+do_daemon() {
+	local base="" up due last t
+	SLEEP_PID=""; CHECK_PID=""
+	trap 'kill $SLEEP_PID $CHECK_PID 2>/dev/null; do_logout >/dev/null 2>&1; rm -f "$RUN_DIR/next"; exit 0' INT TERM
+	load_config
+	mkdir -p "$RUN_DIR" && chmod 700 "$RUN_DIR"
+	# Settings are re-read every minute, so changes apply even when procd's
+	# config trigger does not restart us.
+	while :; do
+		load_config
+		if [ "$ENABLED" != 1 ] || ! time_synced; then
+			rm -f "$RUN_DIR/next"
+			base=""
+			nap 60
+			continue
+		fi
+		# The schedule runs on the router's uptime, so clock steps (NTP
+		# after boot) can neither stall it nor cause a burst of checks.
+		up=$(uptime_s)
+		t=$(date +%s)
+		if [ -z "$base" ]; then
+			# (Re)start: carry on from the last reading if it is recent,
+			# otherwise check now.
+			last=$(do_last 2>/dev/null | cut -d, -f1)
+			last=$(int_or "$last" 0)
+			if [ "$last" -gt 0 ] && [ "$last" -le "$t" ] && [ $(( t - last )) -lt $(( INTERVAL * 60 )) ]; then
+				base=$(( up - (t - last) ))
+			else
+				base=$(( up - INTERVAL * 60 ))
+			fi
+		fi
+		due=$(( base + INTERVAL * 60 ))
+		if [ "$up" -lt "$due" ]; then
+			echo $(( t + due - up )) > "$RUN_DIR/next"
+			nap $(( due - up > 60 ? 60 : due - up ))
+			continue
+		fi
+		base=$(( up + $(jitter) ))
+		( do_check ) >/dev/null 2>&1 &
+		CHECK_PID=$!
+		wait "$CHECK_PID"
+		CHECK_PID=""
+	done
 }
 
 # MODEMHEALTH_LIB=1: only define the functions (for probes and tests).
@@ -293,10 +487,12 @@ do_last() {
 
 case "$1" in
 	check) do_check ;;
+	history) do_history "$2" ;;
 	last) do_last ;;
 	logout) do_logout ;;
+	daemon) do_daemon ;;
 	*)
-		echo "usage: modemhealth check|last|logout" >&2
+		echo "usage: modemhealth check|history [N]|last|logout|daemon" >&2
 		exit 2
 		;;
 esac

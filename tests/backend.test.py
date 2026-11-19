@@ -9,6 +9,7 @@ Usage: python3 tests/backend.test.py
 """
 
 import csv
+import gzip
 import json
 import os
 import shutil
@@ -89,6 +90,19 @@ def read_csv(path):
         return list(csv.DictReader(f))
 
 
+def stored(d, kind):
+    """All rows of a scenario's daily files (readings or channels), oldest first."""
+    folder = os.path.join(d, "data", kind)
+    rows = []
+    if os.path.isdir(folder):
+        for name in sorted(os.listdir(folder)):
+            path = os.path.join(folder, name)
+            opener = gzip.open if name.endswith(".gz") else open
+            with opener(path, "rt") as f:
+                rows += list(csv.DictReader(f))
+    return rows
+
+
 def files_text(folder):
     text = ""
     for dirpath, _, names in os.walk(folder):
@@ -130,6 +144,7 @@ def main():
         control("reset")
 
         host = "modem:%d" % PORT
+        CTL = "curl -sk \"https://modem:%d/_control/set?%%s\" >/dev/null" % PORT
         run_in_openwrt(out, [
             ("good", config(host, PASSWORD, "/out/good/data"), ":"),
             ("wrong_password", config(host, PASSWORD + "x", "/out/wrong_password/data"), ":"),
@@ -167,6 +182,31 @@ def main():
              "test -e /var/run/modemhealth/session && echo kept > /out/logout/session_state || "
              "echo dropped > /out/logout/session_state",
              "modemhealth logout"),
+            # Error counters grow by 100 between two checks.
+            ("deltas", config(host, PASSWORD, "/out/deltas/data"),
+             "modemhealth check >/dev/null; " + CTL % "counter_add=100&uptime=6700"),
+            # The modem restarted: uptime 60 s, counters start again at 7.
+            ("restart", config(host, PASSWORD, "/out/restart/data"),
+             "modemhealth check >/dev/null; " + CTL % "restart=1&counter_add=7"),
+            # A failed check in between: changes count from the last good one.
+            ("failed_between", config(host, PASSWORD, "/out/failed_between/data"),
+             "modemhealth check >/dev/null; uci set modemhealth.main.host=modem:1; modemhealth check >/dev/null; "
+             "uci revert modemhealth; " + CTL % "counter_add=50"),
+            # Days before today are gzipped; days past history_days removed.
+            ("tidy", config(host, PASSWORD, "/out/tidy/data"),
+             "mkdir -p /out/tidy/data/readings /out/tidy/data/channels; "
+             "y=$(date -d @$(( $(date +%s) - 86400 )) +%Y-%m-%d); "
+             "for k in readings channels; do echo header > /out/tidy/data/$k/2020-01-01.csv; "
+             "echo header > /out/tidy/data/$k/$y.csv; done; echo $y > /out/tidy/yesterday"),
+            ("history", config(host, PASSWORD, "/out/history/data"),
+             "modemhealth check >/dev/null; uci set modemhealth.main.host=modem:1; modemhealth check >/dev/null; uci revert modemhealth",
+             ":", "modemhealth history"),
+            # The scheduler checks at once when there is no recent reading, and
+            # logs out of the modem when stopped.
+            ("daemon", config(host, PASSWORD, "/out/daemon/data"),
+             "mkdir -p /var/state; touch /var/state/dnsmasqsec",
+             "pgrep -f 'modemhealth daemon' > /out/daemon/left_running || true",
+             "modemhealth daemon & p=$!; sleep 8; kill $p; sleep 3; echo stopped"),
         ])
 
         # ------------------------------------------------------------ good
@@ -179,7 +219,7 @@ def main():
         check(state["status_reads"] == 1, "good: read all status pages in one request")
         check(state["logouts"] == 0, "good: the session is kept for the next check, not logged out")
 
-        readings = read_csv(os.path.join(d, "data", "readings.csv"))
+        readings = stored(d, "readings")
         check(len(readings) == 1, "good: one reading stored")
         r = readings[0]
         check(r["result"] == "ok" and r["reason"] == "", "good: reading marked ok")
@@ -191,25 +231,33 @@ def main():
         check(r["ds_channels"] == "34" and r["us_channels"] == "5", "good: 34 downstream and 5 upstream channels counted")
         check(abs(int(r["ts"]) - time.time()) < 300, "good: timestamp is now")
 
-        ch = read_csv(os.path.join(d, "data", "channels.csv"))
+        ch = stored(d, "channels")
         ds = [c for c in ch if c["dir"] == "ds"]
         us = [c for c in ch if c["dir"] == "us"]
         check(len(ds) == 34 and len(us) == 5, "good: 39 channel rows stored")
         check(all(c["ts"] == r["ts"] for c in ch), "good: channel rows carry the reading's timestamp")
-        first = {k: ds[0][k] for k in ("ch", "lock", "modulation", "channel_id", "freq_hz", "power_dbmv", "snr_db", "corrected", "uncorrectable")}
-        check(first == {"ch": "1", "lock": "Locked", "modulation": "256QAM", "channel_id": "20", "freq_hz": "501000000",
-                        "power_dbmv": "0.9", "snr_db": "40.9", "corrected": "627773", "uncorrectable": "6793"},
-              "good: downstream channel 1 parsed (leading space in power trimmed)")
-        neg = [c for c in ds if c["ch"] == "29"][0]
+        first = {k: ds[0][k] for k in ("channel_id", "lock", "power_dbmv", "snr_db", "corrected", "uncorrectable")}
+        check(first == {"channel_id": "20", "lock": "Locked", "power_dbmv": "0.9", "snr_db": "40.9",
+                        "corrected": "", "uncorrectable": ""},
+              "good: downstream channel 1 stored (power trimmed; error changes unknown on the first check)")
+        neg = [c for c in ds if c["channel_id"] == "41"][0]
         check(neg["power_dbmv"] == "-1.4", "good: negative power kept")
-        ofdm = [c for c in ds if c["channel_id"] == "194"][0]
-        check(ofdm["modulation"] == "OFDM PLC" and ofdm["corrected"] == "15038563" and ofdm["uncorrectable"] == "184527",
-              "good: OFDM downstream channel parsed")
-        last = {k: us[-1][k] for k in ("ch", "lock", "modulation", "channel_id", "freq_hz", "width_hz", "power_dbmv", "snr_db")}
-        check(last == {"ch": "5", "lock": "Locked", "modulation": "OFDMA", "channel_id": "41", "freq_hz": "36200000",
-                       "width_hz": "44400000", "power_dbmv": "44.5", "snr_db": ""},
-              "good: upstream OFDMA channel parsed (frequency and width in the right columns)")
-        check(us[0]["power_dbmv"] == "50.5" and us[0]["freq_hz"] == "16400000", "good: upstream SC-QAM channel 1")
+        check(us[-1]["channel_id"] == "41" and us[-1]["power_dbmv"] == "44.5" and us[-1]["snr_db"] == "",
+              "good: upstream OFDMA channel stored")
+        check(us[0]["power_dbmv"] == "50.5", "good: upstream SC-QAM channel 1")
+
+        cmap = read_csv(os.path.join(d, "data", "channelmap.csv"))
+        check(len(cmap) == 39 and all(c["ts"] == r["ts"] for c in cmap), "good: channel line-up stored once, with the reading's time")
+        m = {(c["dir"], c["channel_id"]): c for c in cmap}
+        check({k: m[("ds", "20")][k] for k in ("ch", "modulation", "freq_hz", "width_hz")} ==
+              {"ch": "1", "modulation": "256QAM", "freq_hz": "501000000", "width_hz": ""}, "good: downstream line-up parsed")
+        check(m[("ds", "194")]["modulation"] == "OFDM PLC", "good: OFDM downstream in the line-up")
+        check({k: m[("us", "41")][k] for k in ("ch", "modulation", "freq_hz", "width_hz")} ==
+              {"ch": "5", "modulation": "OFDMA", "freq_hz": "36200000", "width_hz": "44400000"},
+              "good: upstream OFDMA line-up (frequency and width in the right columns)")
+        last_state = open(os.path.join(d, "data", "last")).read().splitlines()
+        check(last_state[0] == "%s 6365" % r["ts"] and "ds,20,627773,6793" in last_state and "ds,194,15038563,184527" in last_state,
+              "good: the modem's running error totals kept for the next check")
 
         info = dict(line.split("=", 1) for line in open(os.path.join(d, "data", "modem.txt")).read().splitlines())
         check(info.get("mac") == "00:00:5E:00:53:01" and info.get("docsis") == "DOCSIS 3.1", "good: modem identity saved")
@@ -218,11 +266,11 @@ def main():
         for name, reason in (("wrong_password", "login_refused"), ("no_password", "no_password"),
                              ("unreachable", "unreachable")):
             d = os.path.join(out, name)
-            readings = read_csv(os.path.join(d, "data", "readings.csv"))
+            readings = stored(d, "readings")
             check(open(os.path.join(d, "exit")).read().strip() != "0", "%s: check exits non-zero" % name)
             check(len(readings) == 1 and readings[0]["result"] == "failed" and readings[0]["reason"] == reason,
                   "%s: stored as a failed reading, reason %s (got %s)" % (name, reason, readings[0]["reason"] if readings else "none"))
-            check(len(read_csv(os.path.join(d, "data", "channels.csv"))) == 0, "%s: no channel rows" % name)
+            check(len(stored(d, "channels")) == 0, "%s: no channel rows" % name)
         state = json.load(open(os.path.join(out, "wrong_password", "modem_state.json")))
         check(state["login_failures"] == 1 and state["status_reads"] == 0, "wrong_password: no status read after a refused login")
         state = json.load(open(os.path.join(out, "no_password", "modem_state.json")))
@@ -230,23 +278,74 @@ def main():
 
         # ------------------------------------------------------- timestamps
         d = os.path.join(out, "rapid")
-        readings = read_csv(os.path.join(d, "data", "readings.csv"))
+        readings = stored(d, "readings")
         state = json.load(open(os.path.join(d, "modem_state.json")))
         check([r["result"] for r in readings] == ["ok"] * 4, "rapid: four back-to-back checks all ok")
         check(state["stale_timestamps"] == 0, "rapid: no timestamp ever went backwards")
         d = os.path.join(out, "clock_back")
-        readings = read_csv(os.path.join(d, "data", "readings.csv"))
+        readings = stored(d, "readings")
         state = json.load(open(os.path.join(d, "modem_state.json")))
         check(len(readings) == 1 and readings[0]["result"] == "ok" and state["stale_timestamps"] == 0,
               "clock_back: check still ok after the router clock went back (got %s)" % (readings[0]["reason"] if readings else "none"))
         good_state = json.load(open(os.path.join(out, "good", "modem_state.json")))
         check(good_state["stale_timestamps"] == 0, "good: no stale timestamps")
 
+        # ----------------------------------------------------------- history
+        def channels_at(rows, ts):
+            return {c["channel_id"]: c for c in rows if c["ts"] == ts and c["dir"] == "ds"}
+
+        d = os.path.join(out, "deltas")
+        readings, ch = stored(d, "readings"), stored(d, "channels")
+        check([(r["result"], r["reboot"]) for r in readings] == [("ok", "0"), ("ok", "0")], "deltas: two good readings, no restart")
+        second = channels_at(ch, readings[1]["ts"])
+        check(len(second) == 34 and all(c["corrected"] == "100" and c["uncorrectable"] == "100" for c in second.values()),
+              "deltas: every downstream channel stores the change since the last check (100)")
+        check(all(c["corrected"] == "" for c in ch if c["dir"] == "us"), "deltas: upstream channels have no error counts")
+        check(len(read_csv(os.path.join(d, "data", "channelmap.csv"))) == 39, "deltas: an unchanged line-up is not stored again")
+
+        d = os.path.join(out, "restart")
+        readings, ch = stored(d, "readings"), stored(d, "channels")
+        r2 = readings[-1]
+        check(len(readings) == 2 and r2["reboot"] == "1" and r2["uptime_s"] == "60", "restart: the restart is recorded")
+        check(r2["boot_ts"] != "" and abs(int(r2["ts"]) - 60 - int(r2["boot_ts"])) <= 1, "restart: restart time = reading time - uptime")
+        second = channels_at(ch, r2["ts"])
+        check(all(c["corrected"] == "7" and c["uncorrectable"] == "7" for c in second.values()),
+              "restart: the change is the new count, never negative or a huge jump")
+        check(readings[0]["reboot"] == "0", "restart: the first reading is not a restart")
+
+        d = os.path.join(out, "failed_between")
+        readings, ch = stored(d, "readings"), stored(d, "channels")
+        check([r["result"] for r in readings] == ["ok", "failed", "ok"], "failed_between: ok, failed, ok stored")
+        check(readings[1]["reason"] == "unreachable" and readings[2]["reboot"] == "0", "failed_between: reason kept, no false restart")
+        third = channels_at(ch, readings[2]["ts"])
+        check(all(c["corrected"] == "50" for c in third.values()), "failed_between: changes count from the last good check")
+
+        d = os.path.join(out, "tidy")
+        y = open(os.path.join(d, "yesterday")).read().strip()
+        for kind in ("readings", "channels"):
+            names = sorted(os.listdir(os.path.join(d, "data", kind)))
+            today = [n for n in names if n.endswith(".csv")]
+            check("2020-01-01.csv" not in names and "2020-01-01.csv.gz" not in names, "tidy: %s older than 90 days removed" % kind)
+            check(y + ".csv.gz" in names and y + ".csv" not in names, "tidy: yesterday's %s gzipped" % kind)
+            check(len(today) == 1, "tidy: today's %s file is plain text" % kind)
+        check(len(stored(d, "readings")) == 1, "tidy: readings still readable across plain and gzipped days")
+
+        out_text = open(os.path.join(out, "history", "output.txt")).read().splitlines()
+        check(len(out_text) == 2 and "  ok  " in out_text[0] and "34 ds / 5 us" in out_text[0] and "FAILED  unreachable" in out_text[1],
+              "history: prints the readings, failures included (%s)" % out_text)
+
+        d = os.path.join(out, "daemon")
+        state = json.load(open(os.path.join(d, "modem_state.json")))
+        readings = stored(d, "readings")
+        check(len(readings) == 1 and readings[0]["result"] == "ok", "daemon: checks at once on start")
+        check(state["logouts"] == 1, "daemon: logs out of the modem when stopped")
+        check(open(os.path.join(d, "left_running")).read().strip() == "", "daemon: stops when told to")
+
         # ---------------------------------------------------------- sessions
         def scenario(name):
             d = os.path.join(out, name)
             return (json.load(open(os.path.join(d, "modem_state.json"))),
-                    read_csv(os.path.join(d, "data", "readings.csv")) if os.path.exists(os.path.join(d, "data", "readings.csv")) else [])
+                    stored(d, "readings"))
 
         state, readings = scenario("reuse")
         check([r["result"] for r in readings] == ["ok"] * 3, "reuse: three checks ok")

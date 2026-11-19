@@ -1,0 +1,16 @@
+#!/bin/sh
+# The config holds the modem password: root only.
+chmod 600 /etc/config/modemhealth 2>/dev/null
+
+# reload_config only notices changes to configs it already has a checksum
+# for; register ours so the first "Save & Apply" restarts the scheduler.
+if [ -f /var/run/config.md5 ] && ! grep -q '/var/run/config.check/modemhealth$' /var/run/config.md5; then
+	mkdir -p /var/run/config.check
+	uci show modemhealth > /var/run/config.check/modemhealth 2>/dev/null
+	md5sum /var/run/config.check/modemhealth >> /var/run/config.md5
+	rm -rf /var/run/config.check
+fi
+
+/etc/init.d/modemhealth enable 2>/dev/null
+/etc/init.d/modemhealth restart 2>/dev/null
+exit 0

@@ -14,6 +14,11 @@ Control endpoints (plain GET on the same port) for tests:
                                 expire=1        forget all sessions now
                                 session_limit=N sessions expire after N requests
                                 last_ts=N       latest timestamp already accepted
+                                counter_add=N   add N to every downstream error counter
+                                uptime=N        report N seconds of uptime
+                                restart=1       the modem restarted: counters start
+                                                again from counter_add, uptime from
+                                                the uptime setting (default 60)
     /_control/reset             counters back to zero, defaults restored
 
 Usage: python3 tests/fake_modem.py --port 18443 --password 'secret'
@@ -72,9 +77,30 @@ class Modem:
         self.sessions = {}  # cookie -> {"key": PrivateKey, "used": n}
         self.session_limit = 0
         self.last_ts = 0
+        self.counter_add = 0
+        self.counter_base = True   # False after a restart: counters start from 0
+        self.uptime = None
         self.counts = {"requests": 0, "logins": 0, "login_failures": 0,
                        "bad_signatures": 0, "status_reads": 0, "logouts": 0,
                        "unauthorised": 0, "stale_timestamps": 0}
+
+    def reply_for(self, action):
+        """The captured reply, changed by the counter and uptime controls."""
+        reply = dict(self.actions.get(action, {action + "Result": "ERROR"}))
+        if action == "GetCustomerStatusDownstreamChannelInfo":
+            rows = []
+            for row in reply["CustomerConnDownstreamChannel"].split("|+|"):
+                f = row.split("^")
+                if len(f) > 8 and f[7].strip().isdigit():
+                    base = (lambda v: int(v)) if self.counter_base else (lambda v: 0)
+                    f[7] = str(base(f[7]) + self.counter_add)
+                    f[8] = str(base(f[8]) + self.counter_add)
+                rows.append("^".join(f))
+            reply["CustomerConnDownstreamChannel"] = "|+|".join(rows)
+        if action == "GetCustomerStatusSoftware" and self.uptime is not None:
+            u = self.uptime
+            reply["CustomerConnSystemUpTime"] = "%d day(s) %02dh:%02dm:%02ds" % (u // 86400, u % 86400 // 3600, u % 3600 // 60, u % 60)
+        return reply
 
     def state(self):
         return dict(self.counts, sessions=len(self.sessions))
@@ -124,6 +150,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         m.session_limit = int(value)
                     elif key == "last_ts":
                         m.last_ts = int(value)
+                    elif key == "counter_add":
+                        m.counter_add = int(value)
+                    elif key == "uptime":
+                        m.uptime = int(value)
+                    elif key == "restart":
+                        m.counter_base = False
+                        if m.uptime is None:
+                            m.uptime = 60
                 return self.reply(200, m.state())
         # The real modem sends every other page to the login page.
         self.send_response(302)
@@ -204,7 +238,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if action == "GetMultipleHNAPs":
                 asked = list(body.get("GetMultipleHNAPs", {}).keys())
                 m.counts["status_reads"] += 1
-                replies = {a + "Response": m.actions.get(a, {a + "Result": "ERROR"}) for a in asked}
+                replies = {a + "Response": m.reply_for(a) for a in asked}
                 if len(asked) == 1:
                     return self.reply(200, replies)
                 replies["GetMultipleHNAPsResult"] = "OK"
