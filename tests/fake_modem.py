@@ -96,6 +96,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def not_found(self):
+        body = b"<title>404 Not Found</title><h1>404 Not Found</h1>"
+        self.send_response(404)
+        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     # ------------------------------------------------------------- control
     def do_GET(self):
         url = urllib.parse.urlparse(self.path)
@@ -163,6 +171,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.reply(403, {})
             if ts.isdigit():
                 m.last_ts = int(ts)
+            if action != "Login" and cookies.get("uid") and not session and not pending:
+                m.counts["unauthorised"] += 1
+                return self.not_found()
             if pending and ts and sig != sign(key, ts + soap_action):
                 m.pending.pop(cookies.get("uid", ""), None)
                 m.counts["login_failures"] += 1
@@ -180,13 +191,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.reply(200, {"LogoutResponse": {"LogoutResult": "OK"}})
 
             if not session or key == "withoutloginkey":
+                # The real S34 answers an expired or unknown session with a
+                # plain 404 page (seen after 15 minutes idle).
                 m.counts["unauthorised"] += 1
-                return self.reply(200, {action + "Response": {action + "Result": "UN-AUTH"}})
+                return self.not_found()
             session["used"] += 1
             if m.session_limit and session["used"] > m.session_limit:
                 m.sessions.pop(cookies.get("uid"), None)
                 m.counts["unauthorised"] += 1
-                return self.reply(200, {action + "Response": {action + "Result": "UN-AUTH"}})
+                return self.not_found()
 
             if action == "GetMultipleHNAPs":
                 asked = list(body.get("GetMultipleHNAPs", {}).keys())

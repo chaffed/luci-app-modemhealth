@@ -260,7 +260,8 @@ def main():
 
         state, readings = scenario("expired")
         check([r["result"] for r in readings] == ["ok", "ok"], "expired: the check after expiry is ok, no failure stored")
-        check(state["logins"] == 2 and state["status_reads"] == 2, "expired: logged in again and read the status")
+        check(state["logins"] == 2 and state["status_reads"] == 2 and state["unauthorised"] == 1,
+              "expired: the modem answered 404 once; logged in again and read the status")
 
         state, readings = scenario("expired_wrong_password")
         check([(r["result"], r["reason"]) for r in readings] == [("ok", ""), ("failed", "login_refused")],
