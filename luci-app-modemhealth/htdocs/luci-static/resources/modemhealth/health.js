@@ -275,7 +275,8 @@ var EVENT_KINDS = [
 	{ kind: 't6', re: /T6 time[- ]?out/i },
 	{ kind: 'sync_loss', re: /Loss of Sync|SYNC Timing Synchronization failure/i },
 	{ kind: 'mdd_loss', re: /Lost MDD Timeout/i },
-	{ kind: 'ranging', re: /RNG-RSP|REG-RSP|Ranging Request Retries exhausted/i },
+	{ kind: 'registration', re: /REG-RSP|post cfg file|Registration complete/i },
+	{ kind: 'ranging', re: /RNG-RSP|Ranging Request Retries exhausted/i },
 	{ kind: 'reboot', re: /Cold Start|Warm Start|reboot/i },
 	{ kind: 'status_report', re: /CM-STATUS message sent/i },
 	{ kind: 'config', re: /Diplexer|MIMO Event|TLV-|config file/i }
@@ -297,6 +298,36 @@ function parseModemLog(text) {
 		var f = e.split('^');
 		return { time: f[1] || '', level: f[3] || '', message: f[4] || '', kind: classifyEvent(f[4]) };
 	}).filter(function(e) { return e.time; });
+}
+
+/* Modem time "MM/DD/YYYY HH:MM:SS" -> seconds (for ordering and gaps only;
+ * the modem's clock is local time with an unknown zone). */
+function modemSeconds(s) {
+	var m = /^(\d+)\/(\d+)\/(\d+) (\d+):(\d+):(\d+)$/.exec(String(s || '').trim());
+	return m ? Date.UTC(+m[3], m[1] - 1, +m[2], +m[4], +m[5], +m[6]) / 1000 : null;
+}
+
+/* Re-registrations: the modem signing on to the ISP's network again
+ * without restarting, seen in its log as a registration reply and the
+ * configuration file being applied. Entries within two minutes of each
+ * other are one re-registration.
+ * events: [ { modem_time | time, message, kind? } ] in any order
+ * -> [ { time, events: [ ... ] } ], oldest first */
+function reregistrations(events) {
+	var regs = (events || []).map(function(e) {
+		return { e: e, s: modemSeconds(e.modem_time || e.time), kind: e.kind || classifyEvent(e.message) };
+	}).filter(function(x) { return x.kind === 'registration' && x.s != null; })
+	  .sort(function(a, b) { return a.s - b.s; });
+	var out = [], last = null;
+	regs.forEach(function(x) {
+		if (last && x.s - last.s <= 120) {
+			last.events.push(x.e);
+		} else {
+			last = { time: x.e.modem_time || x.e.time, s: x.s, events: [ x.e ] };
+			out.push(last);
+		}
+	});
+	return out.map(function(r) { return { time: r.time, events: r.events }; });
 }
 
 /* -------------------------------------------------------------- period -- */
@@ -364,5 +395,6 @@ return baseclass.extend({
 	num: num, band: band, limitsFor: limitsFor,
 	channelVerdict: channelVerdict, readingVerdict: readingVerdict,
 	classifyEvent: classifyEvent, parseModemLog: parseModemLog,
+	modemSeconds: modemSeconds, reregistrations: reregistrations,
 	periodVerdict: periodVerdict
 });

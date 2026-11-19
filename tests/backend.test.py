@@ -8,6 +8,7 @@ Needs docker and python3.
 Usage: python3 tests/backend.test.py
 """
 
+import calendar
 import csv
 import gzip
 import json
@@ -203,6 +204,9 @@ def main():
              ":", "modemhealth history"),
             # The scheduler checks at once when there is no recent reading, and
             # logs out of the modem when stopped.
+            # The modem log: stored once; new entries added as it rotates.
+            ("events", config(host, PASSWORD, "/out/events/data"),
+             "modemhealth check >/dev/null; modemhealth check >/dev/null; " + CTL % "new_events=5"),
             ("daemon", config(host, PASSWORD, "/out/daemon/data"),
              "mkdir -p /var/state; touch /var/state/dnsmasqsec",
              "pgrep -f 'modemhealth daemon' > /out/daemon/left_running || true",
@@ -333,6 +337,28 @@ def main():
         out_text = open(os.path.join(out, "history", "output.txt")).read().splitlines()
         check(len(out_text) == 2 and "  ok  " in out_text[0] and "34 ds / 5 us" in out_text[0] and "FAILED  unreachable" in out_text[1],
               "history: prints the readings, failures included (%s)" % out_text)
+
+        d = os.path.join(out, "events")
+        readings, events = stored(d, "readings"), stored(d, "events")
+        out_text = open(os.path.join(d, "output.txt")).read()
+        check(len(readings) == 3, "events: three checks")
+        check(len(events) == 87 + 5, "events: 87 entries stored once (100 less 13 web logins), then the 5 new ones (got %d)" % len(events))
+        check("5 new events" in out_text, "events: the check reports 5 new events")
+        check(not any("WebGUI" in e["message"] for e in events), "events: the modem's web logins are not stored")
+        text = files_text(os.path.join(d, "data", "events")) + open(os.path.join(d, "data", "events.seen")).read()
+        check("203.0.113.7" not in text and "00:00:5E:00:53" not in text, "events: no IP or MAC address in the stored events")
+        at = [e["message"] for e in events if e["modem_time"] == "11/19/2026 12:29:02"]
+        check(len(at) == 2 and any(m.startswith("RNG-RSP") for m in at) and any(m.startswith("REG-RSP") for m in at),
+              "events: two entries with the same time and different messages are both stored")
+        check(events[0]["modem_time"] == "11/19/2026 12:06:13" and events[-1]["message"].endswith("Loss of Sync"),
+              "events: stored oldest first; the new entries last")
+        check(all(e["level"] in ("Critical", "Warning", "Notice") for e in events), "events: levels kept")
+        cs = [e for e in events if e["message"].startswith("CM-STATUS")][0]["message"]
+        check(cs.endswith("OFDM/OFDMA Profile ID: N/A.") , "events: CM-STATUS lines without the MAC/version suffix (%s)" % cs[-40:])
+        modem_epoch = calendar.timegm(time.strptime("11/19/2026 14:13:57", "%m/%d/%Y %H:%M:%S"))
+        offs = [int(r["clock_offset_s"]) - (modem_epoch - int(r["ts"])) for r in readings]
+        check(all(o == 0 for o in offs), "events: clock offset = modem clock - router clock (container in UTC)")
+        check(all(e["clock_offset_s"] != "" for e in events), "events: each event keeps the clock offset when it was first seen")
 
         d = os.path.join(out, "daemon")
         state = json.load(open(os.path.join(d, "modem_state.json")))

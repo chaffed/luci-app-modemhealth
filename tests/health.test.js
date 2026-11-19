@@ -107,6 +107,12 @@ eq(events.length, 100, 'S34 log: 100 entries parsed');
 eq([ kinds.sync_loss, kinds.t3, kinds.t4, kinds.mdd_loss, kinds.login ], [ 13, 1, 1, 3, 13 ], 'S34 log: 13 losses of sync, 1 T3, 1 T4, 3 lost MDD, 13 web logins');
 eq(events[events.length - 1].time, '11/19/2026 12:06:13', 'S34 log: oldest entry time');
 
+var regs = H.reregistrations(events);
+eq(regs.map(function(r) { return r.time; }), [ '11/19/2026 12:28:58', '11/19/2026 13:32:01' ],
+	'S34 log: two re-registrations (12:29 and 13:32), each made of several entries');
+eq(H.reregistrations([ { modem_time: '11/19/2026 10:00:00', message: 'REG-RSP-MP Mismatch' },
+	{ modem_time: '11/19/2026 10:05:00', message: 'REG-RSP-MP Mismatch' } ]).length, 2, 're-registrations more than two minutes apart are counted apart');
+
 /* The log covers 12:06:13 to 14:13:54: just over two hours. */
 var pv = H.periodVerdict({
 	hours: (2 * 3600 + 7 * 60 + 41) / 3600,
