@@ -9,7 +9,8 @@
 #   modemhealth status       state, last reading and modem identity, as JSON
 #   modemhealth data SINCE [UNTIL]
 #                            stored readings, channels, events and line-up
-#                            between two times (epoch seconds), as JSON
+#                            between two times (epoch seconds), as JSON; with
+#                            ISPy's speed tests of that time, if it has any
 #   modemhealth test         try logging in with MH_HOST, MH_USER and
 #                            MH_PASSWORD (environment; empty = saved), as JSON
 #   modemhealth set-password read a new modem password from stdin and save it
@@ -645,10 +646,17 @@ report_html() {
 	done
 	printf '<pre hidden id="mh-channelmap">\n'
 	lineup_between "$since" 9999999999 | sed 's/&/\&amp;/g; s/</\&lt;/g'
-	printf '</pre>\n<script type="application/json" id="mh-ctx">\n'
+	printf '</pre>\n'
+	# ISPy's speed tests of those days, if it has any (numbers only).
+	if f=$(ispy_results) && k=$(speed_rows "$f" "$since" 9999999999) && [ -n "$k" ]; then
+		printf '<pre hidden id="mh-speedtests">\n%s\n</pre>\n' "$k"
+	fi
+	printf '<script type="application/json" id="mh-ctx">\n'
 	{
 		printf '{"exported":%s,"since":%s,"version":%s,"interval":%s,"ping_host":%s,' \
 			"$(date +%s)" "$since" "$(json_str "$VERSION")" "$INTERVAL" "$(json_str "$PING_HOST")"
+		printf '"speed":{"plan_down":%s,"plan_up":%s},' \
+			"$(json_str "$(uci -q get ispy.main.plan_down)")" "$(json_str "$(uci -q get ispy.main.plan_up)")"
 		printf '"sub":{"isp":%s,"subscriber":%s,"account":%s,"address":%s},"modem":{' \
 			"$(cfg_json isp_name)" "$(cfg_json subscriber)" "$(cfg_json account)" "$(cfg_json service_address)"
 		if [ -s "$DATA_DIR/modem.txt" ]; then
@@ -970,6 +978,57 @@ lineup_between() { # $1=since $2=until
 	' "$DATA_DIR/channelmap.csv" 2>/dev/null
 }
 
+# Speed tests. ISPy (luci-app-ispy), a separate app, keeps its speed tests
+# in a file of its own, named in its settings. When that file is there, the
+# pages line the tests up with what the modem recorded, so the tests of a
+# period are passed on: only the columns the pages use, found by name in
+# ISPy's own header, and only values that are plain numbers. Nothing here
+# needs ISPy to be installed, and without its file nothing is passed on.
+SPEED_HEADER='ts,status,down_mbps,up_mbps,wan_down_mbps,wan_up_mbps'
+
+# The file ISPy keeps its results in, if there is one to read. (Like ISPy
+# itself: any other name than an absolute path to a .csv file means its
+# default.)
+ispy_results() {
+	local f
+	f=$(uci -q get ispy.main.results_file)
+	case "$f" in /*.csv) ;; *) f=/etc/ispy/results.csv ;; esac
+	[ -f "$f" ] && [ -r "$f" ] && echo "$f"
+}
+
+# ISPy's tests with SINCE <= time <= UNTIL, as SPEED_HEADER and rows. Fails,
+# printing nothing, when the file is not ISPy's results as we know them.
+speed_rows() { # $1=file $2=since $3=until
+	awk -F, -v s="$2" -v u="$3" -v head="$SPEED_HEADER" '
+		function plain(i) { return i && $i ~ /^[0-9]+(\.[0-9]+)?$/ ? $i : "" }
+		NR == 1 {
+			for (i = 1; i <= NF; i++) col[$i] = i
+			ts = col["ts"]; st = col["status"]; down = col["down_mbps"]; up = col["up_mbps"]
+			if (!ts || !st || !down || !up) exit 1
+			print head
+			next
+		}
+		$ts !~ /^[0-9]+$/ || $ts + 0 < s || $ts + 0 > u { next }
+		# A test ISPy skipped (the line was busy) measured nothing.
+		$st == "ok" || $st == "error" {
+			printf "%s,%s,%s,%s,%s,%s\n", $ts, $st, plain(down), plain(up), plain(col["wan_down_mbps"]), plain(col["wan_up_mbps"])
+		}
+	' "$1" 2>/dev/null
+}
+
+# ,"speed":{...} for the reply of "data": the tests, and the advertised
+# speeds set in ISPy (as text; the pages check them).
+speed_json() { # $1=since $2=until
+	local f rows
+	f=$(ispy_results) || return 0
+	rows=$(speed_rows "$f" "$1" "$2") || return 0
+	[ -n "$rows" ] || return 0
+	printf ',"speed":{"plan_down":%s,"plan_up":%s,"tests":' \
+		"$(json_str "$(uci -q get ispy.main.plan_down)")" "$(json_str "$(uci -q get ispy.main.plan_up)")"
+	printf '%s\n' "$rows" | json_text
+	printf '}'
+}
+
 # stdin -> a JSON string
 json_text() {
 	awk 'BEGIN { printf "\"" } { gsub(/\\/, "\\\\"); gsub(/"/, "\\\""); gsub(/[\001-\037]/, ""); printf "%s\\n", $0 } END { printf "\"" }'
@@ -992,6 +1051,7 @@ do_data() {
 	# losing lock the whole history would outgrow a reply.
 	printf ',"channelmap":'
 	lineup_between "$since" "$until" | json_text
+	speed_json "$since" "$until"
 	echo '}'
 }
 

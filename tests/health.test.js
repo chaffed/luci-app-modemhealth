@@ -177,5 +177,55 @@ eq([ H.channelVerdict({ dir: 'ds', power_dbmv: '-6', snr_db: '40' }).level, H.ch
 	[ 'good', 'marginal' ], 'settings: verdicts use the changed limits');
 ok(H.SOURCES.settings.judgement, 'settings: the settings source is marked as judgement');
 
+/* ------------------------------------- speed tests (ISPy) and the line */
+/* Checks every 300 s from 10000; a window of 300 s around each test. */
+var W = 300, chk = function(ts, level) { return { ts: ts, level: level }; };
+var lineOf = {
+	windowS: W,
+	readings: [ chk(10000, 'healthy'), chk(10300, 'healthy'), chk(10600, 'degraded'), chk(10900, 'healthy'), chk(11200, 'failing'), chk(11500, 'healthy'),
+		chk(11800, 'healthy'), chk(12100, 'unknown'), chk(12400, 'unknown'), chk(12700, 'healthy'), chk(13000, 'healthy'),
+		chk(20000, 'unknown'), chk(30000, 'healthy'), chk(30300, 'healthy'), chk(40000, 'failing'), chk(40300, 'failing'), chk(60000, 'failing') ],
+	events: [ { ts: 12850, kind: 'sync_loss' }, { ts: 30100, kind: 'registration' }, { ts: 30150, kind: 'login' }, { ts: 50000, kind: 't3' } ],
+	outages: [ { start: 12100, end: 12400 }, { start: 40000, end: 40300 } ]
+};
+var PLAN = { down: 1000, up: 40 }, okT = function(ts, down, up) { return { ts: ts, status: 'ok', down: down, up: up }; };
+var one = function(t, plan) { return H.speedTests([ t ], plan === undefined ? PLAN : plan, lineOf).tests[0]; };
+eq([ one(okT(10100, 990, 39)).line, one(okT(10100, 990, 39)).group ], [ 'clear', 'fine' ], 'speed: a test between two good checks: nothing recorded, not slow');
+eq([ one(okT(10400, 990, 39)).line, one(okT(10800, 990, 39)).line ], [ 'marginal', 'marginal' ], 'speed: a marginal check before or after the test: outside the good range, told apart from a problem');
+eq([ one(okT(11100, 990, 39)).line, one(okT(11400, 990, 39)).line ], [ 'out_of_spec', 'out_of_spec' ], 'speed: an out-of-spec check before or after the test');
+eq([ one(okT(60000 - W - 1, 990, 39)).line, one(okT(60000 - W, 990, 39)).line, one(okT(60000 + W, 990, 39)).line, one(okT(60000 + W + 1, 990, 39)).line ],
+	[ 'unknown', 'out_of_spec', 'out_of_spec', 'unknown' ], 'speed: the window is the time between two checks, its ends included');
+eq([ one(okT(12100 - W, 990, 39)).line, one(okT(12100 - W - 1, 990, 39)).line, one(okT(12250, 990, 39)).line, one(okT(12400 + W, 990, 39)).line ],
+	[ 'outage', 'clear', 'outage', 'outage' ], 'speed: within the window of an outage\'s first or last failing check: during the outage');
+eq(one(okT(12400 + W + 1, 990, 39)).line, 'events', 'speed: just after the outage\'s window, with a loss of sync in the log close by: events');
+eq([ one(okT(12850 + W, 990, 39)).line, one(okT(12850 + W + 1, 990, 39)).line ], [ 'events', 'clear' ], 'speed: a log entry counts within the same window');
+eq([ one(okT(30100, 990, 39)).line, one(okT(50000, 990, 39)).line ], [ 'clear', 'events' ],
+	'speed: a registration or login entry is not a problem; a time-out is, even with no check near it');
+eq([ one(okT(20000, 990, 39)).line, one(okT(25000, 990, 39)).line ], [ 'unknown', 'unknown' ],
+	'speed: only a check that could not read the modem, or no check at all: not known, never good');
+eq(one(okT(40100, 990, 39)).line, 'outage', 'speed: the worst of what applies is the one counted (outage before signal values)');
+eq([ one(okT(10100, 799.9, 39)).group, one(okT(10100, 800, 39)).group, one(okT(10100, 990, 31.9)).group, one(okT(10100, 990, 32)).group ],
+	[ 'slow', 'fine', 'slow', 'fine' ], 'speed: slow is below 80% of the advertised speed, in either direction; exactly 80% is not slow');
+var both = one(okT(10100, 500, 20));
+eq([ both.slowDown, both.slowUp, both.downShare, both.upShare ], [ true, true, 0.5, 0.5 ], 'speed: each direction says whether it was slow, and its share of the advertised speed');
+eq([ one(okT(10100, 500, 20), { down: 1000, up: null }).slowUp, one(okT(10100, 990, 20), { down: 1000, up: null }).group, one(okT(10100, 500, 20), {}).group, one(okT(10100, 500, 20), null).group ],
+	[ false, 'fine', 'unjudged', 'unjudged' ], 'speed: a direction with no advertised speed is not judged; with none at all no test is called slow or not');
+var failedTest = one({ ts: 12250, status: 'error', down: 3, up: 1 });
+eq([ failedTest.group, failedTest.line, failedTest.down, failedTest.slowDown ], [ 'failed', 'outage', null, undefined ], 'speed: a test that did not complete is failed, never slow, and has no speed');
+var many = H.speedTests([ okT(40100, 100, 39), okT(10100, 990, 39), okT(11100, 700, 39), okT(10400, 500, 39), okT(25000, 500, 39), okT(12850, 990, 39),
+	{ ts: 12250, status: 'error' }, { ts: 10100, status: 'skipped' }, { ts: 'x', status: 'ok', down: 1, up: 1 }, okT(10110, 990, 10) ], PLAN, lineOf);
+eq(many.tests.map(function(t) { return t.ts; }), [ 10100, 10110, 10400, 11100, 12250, 12850, 25000, 40100 ], 'speed: oldest first; skipped tests and rows without a time are left out');
+eq([ many.n, many.counts.slow, many.counts.fine, many.counts.failed, many.counts.unjudged.total ], [ 8,
+	{ total: 5, problem: 2, outage: 1, events: 0, out_of_spec: 1, marginal: 1, clear: 1, unknown: 1 },
+	{ total: 2, problem: 1, outage: 0, events: 1, out_of_spec: 0, marginal: 0, clear: 1, unknown: 0 },
+	{ total: 1, problem: 1, outage: 1, events: 0, out_of_spec: 0, marginal: 0, clear: 0, unknown: 0 }, 0 ],
+	'speed: counted by group and by what the modem recorded; a line problem is an outage, events or a value out of spec');
+ok([ 'slow', 'fine', 'failed', 'unjudged' ].every(function(g) {
+	var c = many.counts[g];
+	return H.LINE_STATES.reduce(function(s2, k) { return s2 + c[k]; }, 0) === c.total && c.problem === c.outage + c.events + c.out_of_spec;
+}), 'speed: every test is counted exactly once');
+eq([ H.speedTests([], PLAN, lineOf).n, H.speedTests(null, PLAN, { windowS: W }).n, H.speedTests([ okT(1, 1, 1) ], PLAN, {}).tests[0].line ], [ 0, 0, 'unknown' ],
+	'speed: no tests, or no history at all, is not an error');
+
 console.log(fail ? '\n' + fail + ' check(s) failed' : '\nall checks passed');
 process.exit(fail ? 1 : 0);

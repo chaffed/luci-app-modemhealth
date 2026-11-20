@@ -13,6 +13,7 @@ import csv
 import gzip
 import json
 import os
+import re
 import shutil
 import socket
 import ssl
@@ -29,6 +30,12 @@ PORT = 18443
 PASSWORD = "Pa ss,w\"o'r$d\\`1"
 
 failures = []
+
+
+ISPY_HEADER = ("ts,backend,server,ping_ms,jitter_ms,loss_pct,loaded_down_ms,loaded_up_ms,down_mbps,up_mbps,bytes,status,message,"
+               "wan_down_mbps,wan_up_mbps,bg_down_mbps,bg_up_mbps,cpu_down_pct,cpu_up_pct,link_mbps,dev")
+ISPY_CONFIG = "printf '%s\\n' \"config ispy 'main'\" \"\toption plan_down '1000'\" \"\toption plan_up '40'\" {} > /etc/config/ispy; "
+ISPY_GONE = "rm -rf /etc/ispy /etc/config/ispy"
 
 
 def check(cond, what):
@@ -126,6 +133,28 @@ def main():
     out = tempfile.mkdtemp(prefix="backend-", dir=os.path.join(ROOT, ".test-out"))
     try:
         shutil.copy(os.path.join(ROOT, "tests", "fixtures", "outages", "readings.csv"), os.path.join(out, "outages_fixture.csv"))
+        # ISPy's results file, as ISPy 1.2.0 writes it, with rows that must
+        # not get through as they are: a failed test whose message holds
+        # markup, values that are not numbers, a row without a time, a
+        # status ISPy does not have.
+        now = int(time.time())
+        with open(os.path.join(out, "ispy.csv"), "w") as f:
+            f.write("\n".join([
+                ISPY_HEADER,
+                "%d,cloudflare,SJC,12.1,0.4,0.0,30.6,60.7,930.01,39.79,1488019284,ok,,933.73,39.95,0.31,0.05,41,23,2500,eth0" % (now - 9000),
+                "%d,cloudflare,SJC,12.1,0.4,0.0,30.6,60.7,701.50,38.20,1488019284,ok,,,,0.31,0.05,41,23,2500,eth0" % (now - 3000),
+                "%d,cloudflare,,,,,,,,,0,error,<img src=x onerror=alert(1)> no route,,,0.02,0.00,,,2500,eth0" % (now - 2400),
+                "%d,cloudflare,,,,,,,,,0,skipped,line busy (61.20 Mbit/s > 50),,,,,,,,eth0" % (now - 1800),
+                "%d,ookla,x,1,1,0,1,1,<b>9</b>,1e3,1,ok,,\"7\",-5,,,,,2500,eth0" % (now - 1200),
+                "%d,ookla,x,1,1,0,1,1,5,5,1,<script>,,5,5,,,,,2500,eth0" % (now - 900),
+                "soon,ookla,x,1,1,0,1,1,5,5,1,ok,,5,5,,,,,2500,eth0",
+                "%d,ookla,Example Fiber,13.379,0.099,,26.845,8.632,2342.23,297.90,3461861598,ok,,2351.02,298.11,0.01,0.00,,,2500,eth0" % (now - 600), ""]))
+        # The same tests from a file with its columns in another order, and
+        # a file that is not ISPy's results at all.
+        with open(os.path.join(out, "ispy_other.csv"), "w") as f:
+            f.write("status,up_mbps,down_mbps,ts,extra\nok,39.79,930.01,%d,x\nerror,,,%d,y\n" % (now - 9000, now - 2400))
+        with open(os.path.join(out, "not_ispy.csv"), "w") as f:
+            f.write("root:x:0:0:root:/root:/bin/ash\n%d,ok,1,1\n" % (now - 600))
         for _ in range(50):
             try:
                 socket.create_connection(("127.0.0.1", PORT), timeout=0.2).close()
@@ -241,6 +270,22 @@ def main():
              "100,ds,1,20,256QAM,501000000, 100,us,1,1,SC-QAM,16400000,6400000 200,ds,1,20,Unknown,501000000, "
              "300,ds,1,20,256QAM,501000000, 400,us,1,1,SC-QAM,16400000,3200000 > /out/web_lineup/data/channelmap.csv",
              ":", "modemhealth data 250 350"),
+            # ISPy's speed tests, when it is installed: the tests of the period,
+            # numbers only. Its file is where its own settings say, or at its
+            # default. (Every other scenario runs without ISPy.)
+            ("speed", config(host, PASSWORD, "/out/speed/data", export_dir="/out/speed/drive/modemhealth"),
+             ISPY_CONFIG.format("") + "mkdir -p /etc/ispy; cp /out/ispy.csv /etc/ispy/results.csv; modemhealth check >/dev/null; "
+             "cp /out/speed/drive/modemhealth/modemhealth-report.html /out/speed/report.html",
+             "modemhealth data 0 $(( $(date +%s) - 5000 )) > /out/speed/earlier.json; " + ISPY_GONE,
+             "modemhealth data $(( $(date +%s) - 4000 ))"),
+            ("speed_elsewhere", config(host, PASSWORD, "/out/speed_elsewhere/data"),
+             ISPY_CONFIG.format("\"\toption results_file '/out/ispy_other.csv'\"")
+             + "uci set ispy.main.plan_down='9\"},\"x\":\"1'; uci delete ispy.main.plan_up; uci commit ispy",
+             ISPY_GONE, "modemhealth data 0"),
+            ("speed_not_ispy", config(host, PASSWORD, "/out/speed_not_ispy/data"),
+             ISPY_CONFIG.format("\"\toption results_file '/out/not_ispy.csv'\""),
+             "uci set ispy.main.results_file=/etc/passwd; uci commit ispy; modemhealth data 0 > /out/speed_not_ispy/passwd.json; " + ISPY_GONE,
+             "modemhealth data 0"),
             # The copy on a drive. /out is a folder of the host shared with the
             # container: to the backend, a mounted drive.
             ("export", config(host, PASSWORD, "/out/export/data", export_dir="/out/export/drive/modemhealth"),
@@ -477,6 +522,33 @@ def main():
               "web data: the line-up as it was at the start of the period, then each change in it, nothing later (%s)" % lineup[1:])
         check(st.get("version") == "0.1.0", "web status: the version")
 
+        # ------------------------------------------------ ISPy's speed tests
+        check("speed" not in data and "speed" not in future, "speed tests: without ISPy the data says nothing about speed")
+        d = os.path.join(out, "speed")
+        sp = json.loads(open(os.path.join(d, "output.txt")).read())["speed"]
+        tests = [l.split(",") for l in sp["tests"].split("\n") if l]
+        check(tests[0] == "ts,status,down_mbps,up_mbps,wan_down_mbps,wan_up_mbps".split(",") and [t[1:] for t in tests[1:]] == [
+            ["ok", "701.50", "38.20", "", ""], ["error", "", "", "", ""], ["ok", "", "", "", ""], ["ok", "2342.23", "297.90", "2351.02", "298.11"]],
+            "speed tests: the tests of the period with their speeds; a skipped test, a row without a time and an unknown status are left out (%s)" % tests[1:])
+        check(re.fullmatch(r"[a-z_0-9,.\n]+", sp["tests"]) is not None and [sp["plan_down"], sp["plan_up"]] == ["1000", "40"],
+              "speed tests: nothing but numbers and the status gets through, whatever ISPy's file holds; the advertised speeds come from ISPy's settings")
+        earlier = json.loads(open(os.path.join(d, "earlier.json")).read())["speed"]["tests"].split("\n")
+        check(len(earlier) == 3 and earlier[1].endswith(",ok,930.01,39.79,933.73,39.95") and earlier[2] == "", "speed tests: only those of the period asked for")
+        report = open(os.path.join(d, "report.html")).read()
+        held = report.split('<pre hidden id="mh-speedtests">')[1].split("</pre>")[0].strip().split("\n")
+        ctx = json.loads(report.split('<script type="application/json" id="mh-ctx">')[1].split("</script>")[0])
+        check(len(held) == 1 + 5 and held[1].endswith(",ok,930.01,39.79,933.73,39.95") and ctx["speed"] == {"plan_down": "1000", "plan_up": "40"}
+              and "onerror" not in report.split("<script>")[0] and "no route" not in report,
+              "speed tests: the report file on the drive carries them and the advertised speeds, and nothing else of ISPy's file")
+        sp = json.loads(open(os.path.join(out, "speed_elsewhere", "output.txt")).read())["speed"]
+        check(sp["tests"].split("\n")[1:3] == ["%d,ok,930.01,39.79,," % (now - 9000), "%d,error,,,," % (now - 2400)]
+              and sp["plan_down"] == '9"},"x":"1' and sp["plan_up"] == "",
+              "speed tests: read from where ISPy's settings say, columns found by name; an advertised speed that is not a number stays text (%s)" % sp["plan_down"])
+        other = json.loads(open(os.path.join(out, "speed_not_ispy", "output.txt")).read())
+        passwd = json.loads(open(os.path.join(out, "speed_not_ispy", "passwd.json")).read())
+        check("speed" not in other and "speed" not in passwd and "root" not in json.dumps(other) + json.dumps(passwd),
+              "speed tests: a file that is not ISPy's results is not passed on, nor one that is not a .csv file")
+
         d = os.path.join(out, "web_test")
         res = json.loads(open(os.path.join(d, "output.txt")).read())
         check(res == {"ok": True, "model": "S34", "firmware": "AT01.01.010.042324_S3.04.735", "downstream": 34, "upstream": 5},
@@ -557,6 +629,8 @@ def main():
         check(ctx["modem"].get("mac") == "00:00:5E:00:53:01" and ctx["version"] == "0.1.0" and ctx["interval"] == 5 and ctx["sub"]["subscriber"] == "Zoe Example"
               and ctx["limits"] == {}, "copy: its settings are valid JSON with the modem's identity (%s)" % sorted(ctx))
         text = files_text(drive)
+        check("mh-speedtests" not in report.split("<script>")[0] and ctx["speed"] == {"plan_down": "", "plan_up": ""},
+              "copy: without ISPy the report file holds no speed tests")
         check(PASSWORD not in text and "Pa ss" not in text and "password" not in json.dumps(ctx).lower(),
               "copy: the modem password is in none of the files on the drive, and no setting of that name is carried")
         st = json.loads(open(os.path.join(d, "status.json")).read())

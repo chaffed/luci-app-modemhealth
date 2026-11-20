@@ -40,7 +40,10 @@ var rpc = { declare: function(o) { return function(since, until) {
 		var l = t.split('\n').filter(Boolean);
 		return [ l[0] ].concat(l.slice(1).filter(function(r) { var ts = +r.split(',')[0]; return ts >= since && ts <= until; })).join('\n') + '\n';
 	};
-	return Promise.resolve({ readings: cut(d.readings), channels: cut(d.channels), events: cut(d.events), channelmap: d.channelmap });
+	var reply = { readings: cut(d.readings), channels: cut(d.channels), events: cut(d.events), channelmap: d.channelmap };
+	/* ISPy's speed tests, when the router has any (see the end). */
+	if (d.speed) reply.speed = { plan_down: d.speed.plan_down, plan_up: d.speed.plan_up, tests: cut(d.speed.tests) };
+	return Promise.resolve(reply);
 }; } };
 var mh = new Function('baseclass', 'rpc', 'health', fs.readFileSync(path.join(RES, 'modemhealth/common.js'), 'utf8'))(baseclass, rpc, health);
 
@@ -139,6 +142,71 @@ mh.load(T - 6 * 3600, T + 7 * S, 1).then(async function(D) {
 	var D2 = mh.analyse(D, 5, mine.limits);
 	eq([ D2.readings[0].verdict.level, D2.limits === mine.limits ], [ 'healthy', true ], 'analyse: judged against the limits from the settings');
 	mh.analyse(D, 5);
+
+	/* ---------------------------------------------- ISPy's speed tests */
+	eq([ D.speed, D.speedTests ], [ null, null ], 'speed: without ISPy there is nothing about speed');
+	/* As the backend passes them on: time, status, the test's own figures
+	 * and what ISPy counted on the WAN port. Checks were at T, T + S, ...,
+	 * the outage at T + 3 S and T + 4 S, and the log's last loss of sync
+	 * 200 s before T; the advertised speed is 1000/40. */
+	var HEAD = 'ts,status,down_mbps,up_mbps,wan_down_mbps,wan_up_mbps';
+	var speedRows = [
+		[ T - 5 * 3600, 'ok', 950, 39, 952, 39.2 ],        /* in the earlier piece, hours before the first check */
+		[ T + 30, 'ok', 990.5, 39, 995.25, 39.1 ],         /* 230 s after that loss of sync */
+		[ T + S + 40, 'ok', 700, 39, 960, 39.1 ],          /* slow by the test, not by what crossed the WAN port */
+		[ T + 3 * S + 20, 'error', '', '', '', '' ],
+		[ T + 4 * S + 20, 'ok', 120, 12, 118, 11.5 ],
+		[ T + 5 * S + 250, 'ok', 610, 38, '', '' ],        /* no WAN figures (an older ISPy) */
+		[ T + 6 * S + 10, 'ok', '', 39, '', 39 ],          /* no download figure at all: not a test */
+		[ 'x', 'ok', 1, 1, 1, 1 ]
+	].map(function(r) { return r.join(','); });
+	served.data = Object.assign({}, whole, { speed: { plan_down: '1000', plan_up: '40', tests: [ HEAD ].concat(speedRows).join('\n') + '\n' } });
+	var before = dataCalls;
+	var Ds = mh.analyse(await mh.load(T - 6 * 3600, T + 7 * S, 1), 5), ST = Ds.speedTests;
+	eq([ dataCalls - before, Ds.speed.planDown, Ds.speed.planUp, Ds.speed.tests.length ], [ 2, 1000, 40, 5 + 1 ],
+		'speed: the tests of every piece of the period, once each; rows without a time or a speed are not tests');
+	eq(ST.tests.map(function(t) { return [ t.ts - T, t.group, t.line, t.down, t.up ]; }), [
+		[ -5 * 3600, 'fine', 'unknown', 952, 39.2 ],
+		[ 30, 'fine', 'events', 995.25, 39.1 ],
+		[ S + 40, 'fine', 'marginal', 960, 39.1 ],
+		[ 3 * S + 20, 'failed', 'outage', null, null ],
+		[ 4 * S + 20, 'slow', 'outage', 120, 12 ],
+		[ 5 * S + 250, 'slow', 'marginal', 610, 38 ]
+	], 'speed: each test credited with the higher of the test and the WAN port (as ISPy does), and set against what the modem recorded around it');
+	eq([ ST.windowS, mh.analyse(Ds, 1).speedTests.windowS, mh.analyse(Ds, 15).speedTests.windowS ], [ 300, 300, 900 ],
+		'speed: the window is the time between two checks, and never less than five minutes');
+	mh.analyse(Ds, 5);
+	eq(mh.speedSentences(ST), [
+		'6 speed tests by ISPy in this period, of which 1 did not complete.',
+		'Slow (download or upload below 80% of the advertised speed): 2 tests, 1 of them within 5 minutes of a line problem the modem recorded.',
+		'Not slow: 3 tests, 1 of them within 5 minutes of a line problem. For 1 it is not known: no check read the modem then.'
+	], 'speed: in words, for the Overview; a test with no check near it is said to be not known');
+	var sc = mh.speedChart(ST, { from: T - 600, to: T + 7 * S });
+	eq([ sc.percent, sc.before, sc.stretch, sc.chart.suffix, sc.chart.series.map(function(x) { return [ x.name, x.dots, x.points.length ]; }), sc.chart.marks.length, sc.chart.bands ],
+		[ true, 1, null, '%', [ [ 'download', true, 4 ], [ 'upload', true, 4 ] ], 1, [ { lo: null, hi: 80, color: mh.C.bad } ] ],
+		'speed chart: a dot for each test that completed, in percent of the advertised speed, the slow band shaded, a tick for the failed test, and the test from before the axis left out');
+	eq([ sc.chart.series[0].points[2].slice(0, 2), sc.chart.series[1].points[2][1], /download 120 Mbit\/s, 12% of the advertised 1000 Mbit\/s$/.test(sc.chart.series[0].points[2][2]) ],
+		[ [ T + 4 * S + 20, 12 ], 30, true ], 'speed chart: each dot at the test\'s time and share, described in Mbit/s and percent');
+	var svg = mh.chartSVG(Object.assign({ from: T - 600, to: T + 7 * S, title: 'Speed' }, sc.chart));
+	eq([ (svg.match(/<circle /g) || []).length, (svg.match(/<path /g) || []).length, />80%</.test(svg), /speed test did not complete/.test(svg) ],
+		[ 8, 0, true, true ], 'speed chart: drawn as dots without a line, the axis in percent');
+	var few = mh.speedChart(ST, { from: T - 600, to: T + 7 * S, max: 2 });
+	eq([ few.chart.series[0].points.length <= 2, few.stretch > 0, few.chart.series[0].points.some(function(p) { return p[1] === 12; }) ], [ true, true, true ],
+		'speed chart: too many tests to draw: the slowest of each stretch is kept, and the chart says how long a stretch is');
+
+	served.data = Object.assign({}, whole, { speed: { plan_down: '', plan_up: 'fast', tests: [ HEAD ].concat(speedRows).join('\n') + '\n' } });
+	var Dn = mh.analyse(await mh.load(T - 6 * 3600, T + 7 * S, 1), 5), noPlan = mh.speedChart(Dn.speedTests, { from: T - 600, to: T + 7 * S });
+	eq([ Dn.speed.planDown, Dn.speed.planUp, Dn.speedTests.counts.unjudged.total, Dn.speedTests.counts.slow.total, mh.speedSentences(Dn.speedTests)[1] ],
+		[ null, null, 5, 0, 'No advertised speed is set in ISPy, so its tests cannot be called slow or not.' ],
+		'speed: with no advertised speed set in ISPy (or one that is not a number) no test is called slow');
+	eq([ noPlan.percent, noPlan.chart.bands.length, noPlan.chart.series[0].points[2][1], noPlan.chart.suffix ], [ false, 0, 120, '' ], 'speed chart: then in Mbit/s, with no slow band');
+	served.data = Object.assign({}, whole, { speed: { plan_down: '1000', plan_up: '', tests: [ HEAD ].concat(speedRows).join('\n') + '\n' } });
+	var D1 = mh.analyse(await mh.load(T - 6 * 3600, T + 7 * S, 1), 5);
+	eq([ mh.speedSentences(D1.speedTests)[1], mh.speedChart(D1.speedTests, { from: T - 600, to: T + 7 * S }).chart.series.length ],
+		[ 'Slow (download below 80% of the advertised speed): 2 tests, 1 of them within 5 minutes of a line problem the modem recorded.', 1 ], 'speed: with only a download speed advertised, only download is judged and drawn');
+	served.data = Object.assign({}, whole, { speed: { plan_down: '1000', plan_up: '40', tests: HEAD + '\n' } });
+	eq((mh.analyse(await mh.load(T - 6 * 3600, T + 7 * S, 1), 5)).speedTests, null, 'speed: ISPy installed but with no test in the period: nothing about speed');
+	served.data = whole;
 }).catch(function(e) { fail++; console.log('FAIL ' + e.stack); }).then(function() {
 	console.log(fail ? '\n' + fail + ' check(s) failed' : '\nall checks passed');
 	process.exit(fail ? 1 : 0);

@@ -76,6 +76,21 @@ function lineUp(text) {
 	};
 }
 
+/* ISPy's speed tests, as the backend passes them on (see speed_rows
+ * there), or null when ISPy has none. A test is credited, as in ISPy, with
+ * the higher of what the test measured and the traffic counted on the WAN
+ * port while it ran; a test that failed has no speed.
+ * -> { planDown, planUp (Mbit/s or null), tests: [ { ts, status, down, up } ] } */
+function speedData(sp) {
+	if (!sp || !sp.tests) return null;
+	var plan = function(v) { var n = health.num(v); return n != null && n > 0 ? n : null; };
+	var best = function(a, b) { a = health.num(a); b = health.num(b); return a == null ? b : (b == null ? a : Math.max(a, b)); };
+	return { planDown: plan(sp.plan_down), planUp: plan(sp.plan_up), tests: parseCSV(sp.tests).map(function(t) {
+		var ok = t.status === 'ok';
+		return { ts: +t.ts, status: t.status, down: ok ? best(t.down_mbps, t.wan_down_mbps) : null, up: ok ? best(t.up_mbps, t.wan_up_mbps) : null };
+	}).filter(function(t) { return t.ts > 0 && (t.status === 'error' || (t.down != null && t.up != null)); }) };
+}
+
 /* What the backend's data command returns, joined up: channels carry
  * their position, modulation, frequency and width from the line-up, events
  * their kind and their time on the router's clock. */
@@ -93,7 +108,15 @@ function assemble(d) {
 		e.ts = eventTime(e);
 		return e;
 	});
-	return { readings: parseCSV(d.readings), channels: channels, channelsAt: byTs, events: events };
+	return { readings: parseCSV(d.readings), channels: channels, channelsAt: byTs, events: events, speed: speedData(d.speed) };
+}
+
+/* The speed tests of several pieces of a period as one. */
+function addSpeed(all, sp) {
+	if (!sp) return all;
+	if (!all) return { planDown: sp.planDown, planUp: sp.planUp, tests: sp.tests.slice() };
+	sp.tests.forEach(function(t) { all.tests.push(t); });
+	return all;
 }
 
 /* A ubus reply fails somewhere between 1 and 2 MB, and a check stores
@@ -122,6 +145,7 @@ function load(since, until, intervalMin) {
 			}).join('');
 		};
 		var D = assemble({ readings: join('readings'), channels: join('channels'), events: join('events'), channelmap: join('channelmap') });
+		D.speed = parts.reduce(function(all, p) { return addSpeed(all, speedData((p || {}).speed)); }, null);
 		D.since = since; D.until = until;
 		D.events = D.events.filter(inPeriod(since, until)).sort(function(a, b) { return a.ts - b.ts; });
 		D.readings.sort(function(a, b) { return a.ts - b.ts; });
@@ -175,6 +199,7 @@ function reduce(G, P) {
 		G.readings.push(r);
 	});
 	P.events.forEach(function(e) { G.events.push(e); });
+	G.speed = addSpeed(G.speed, P.speed);
 }
 
 /* A period reduced piece by piece (see reduce), so that months of channel
@@ -183,7 +208,7 @@ function reduce(G, P) {
  *    .latest the newest good reading with its channels. */
 function loadDigest(since, until, intervalMin, limits, progress) {
 	var G = { since: since, until: until, interval: intervalMin || 5, limits: limits || health.LIMITS,
-		readings: [], events: [], channels: {}, latest: null, judged: true };
+		readings: [], events: [], channels: {}, latest: null, speed: null, judged: true };
 	var todo = pieces(since, until, intervalMin), i = 0;
 	var next = function() {
 		if (i >= todo.length) {
@@ -226,6 +251,15 @@ function analyse(D, intervalMin, limits) {
 		outages: outages
 	}, limits);
 	D.period.hours = hours;
+	/* ISPy's speed tests of the period, each lined up with what the modem
+	 * recorded within one check interval of it, and no less than five
+	 * minutes: a test takes about a minute (null: ISPy has none). */
+	var tests = D.speed ? D.speed.tests.filter(inPeriod(D.since, D.until)) : [];
+	D.speedTests = tests.length ? health.speedTests(tests, { down: D.speed.planDown, up: D.speed.planUp }, {
+		readings: D.readings.map(function(r) { return { ts: +r.ts, level: r.verdict.level }; }),
+		events: disruptive, outages: outages, windowS: Math.max(intervalMin || 5, 5) * 60
+	}) : null;
+	if (D.speedTests && !D.speedTests.n) D.speedTests = null;
 	return D;
 }
 
@@ -331,6 +365,96 @@ function groupedText(g, hours) {
 	return _('%s %s on %s: %s %s.').format(L.label || g.kind, LEVEL_TEXT[g.level], where, range, L.unit || '');
 }
 
+/* --------------------------------------------------------- speed tests -- */
+
+function nOf(count, one, many) {
+	return '%d %s'.format(count, count === 1 ? one : many);
+}
+
+function fmtMbps(v) {
+	/* Whole numbers from 100 up; below that one decimal, if it has one. */
+	return v == null ? '–' : _('%s Mbit/s').format(v >= 100 ? fmtNum(v, 0) : String(+(+v).toFixed(1)));
+}
+
+/* Which speeds a test is judged on: those ISPy has an advertised speed for. */
+function speedDirections(ST) {
+	return ST.plan.down && ST.plan.up ? _('download or upload') : (ST.plan.down ? _('download') : _('upload'));
+}
+
+/* ISPy's speed tests of a period in a few sentences (ST: what analyse()
+ * leaves in .speedTests), for the Overview. */
+function speedSentences(ST) {
+	var c = ST.counts, min = Math.round(ST.windowS / 60), ran = ST.n - c.failed.total, out = [];
+	out.push(c.failed.total
+		? _('%s by ISPy in this period, of which %d did not complete.').format(nOf(ST.n, _('speed test'), _('speed tests')), c.failed.total)
+		: _('%s by ISPy in this period.').format(nOf(ST.n, _('speed test'), _('speed tests'))));
+	if (!ran)
+		return out;
+	if (!ST.plan.down && !ST.plan.up) {
+		out.push(_('No advertised speed is set in ISPy, so its tests cannot be called slow or not.'));
+		return out;
+	}
+	/* Tests with no check of the modem near them are said to be so: "1 of
+	 * 8" must not read as "7 were at times without a problem". */
+	var unknown = function(g) { return g.unknown ? ' ' + _('For %d it is not known: no check read the modem then.').format(g.unknown) : ''; };
+	out.push(_('Slow (%s below 80%% of the advertised speed): %s, %d of them within %d minutes of a line problem the modem recorded.')
+		.format(speedDirections(ST), nOf(c.slow.total, _('test'), _('tests')), c.slow.problem, min) + unknown(c.slow));
+	if (c.fine.total)
+		out.push(_('Not slow: %s, %d of them within %d minutes of a line problem.').format(nOf(c.fine.total, _('test'), _('tests')), c.fine.problem, min) + unknown(c.fine));
+	return out;
+}
+
+/* The speed tests as a chart on the pages' time axis: a dot for each test
+ * that completed, as a share of the advertised speed where ISPy has one
+ * (download and upload then fit one scale, and slow is the shaded part
+ * below 80%), otherwise in Mbit/s. Tests that did not complete are grey
+ * ticks at the bottom.
+ * o: { from, to: the axis; max: draw at most this many dots per direction
+ *      (the slowest test of each stretch is kept) }
+ * -> { chart: options for chartSVG (series, bands, marks, zero, suffix, tickStep),
+ *      legend: [ { name, color, faint } ], percent, stretch: seconds each
+ *      dot stands for (null: every test is drawn), before: tests that
+ *      started before the axis does } */
+function speedChart(ST, o) {
+	var pd = ST.plan.down, pu = ST.plan.up, percent = !!(pd || pu);
+	var shown = ST.tests.filter(function(t) { return t.ts >= o.from && t.ts <= o.to; });
+	var ok = shown.filter(function(t) { return t.status === 'ok'; }), stretch = null;
+	var points = function(key, plan, word) {
+		var pts = ok.filter(function(t) { return t[key] != null; }).map(function(t) {
+			return percent
+				? [ t.ts, +(t[key] / plan * 100).toFixed(1), _('%s · %s %s, %d%% of the advertised %s').format(fmtTime(t.ts), word, fmtMbps(t[key]), Math.round(t[key] / plan * 100), fmtMbps(plan)) ]
+				: [ t.ts, t[key], '%s · %s %s'.format(fmtTime(t.ts), word, fmtMbps(t[key])) ];
+		});
+		if (!o.max || pts.length <= o.max) return pts;
+		/* Too many to draw: the slowest test of each stretch. */
+		var w = Math.max((o.to - o.from) / o.max, 1), box = {};
+		stretch = w;
+		pts.forEach(function(p) {
+			var k = Math.floor((p[0] - o.from) / w);
+			if (!box[k] || p[1] < box[k][1]) box[k] = p;
+		});
+		return Object.keys(box).sort(function(a, b) { return a - b; }).map(function(k) { return box[k]; });
+	};
+	var series = [], legend = [];
+	[ [ 'down', pd, _('download'), C.series[0] ], [ 'up', pu, _('upload'), C.series[1] ] ].forEach(function(d) {
+		if (percent && !d[1]) return;
+		series.push({ name: d[2], color: d[3], dots: true, points: points(d[0], d[1], d[2]) });
+		legend.push({ name: d[2], color: d[3] });
+	});
+	if (percent) legend.push({ name: _('slow: below 80% of the advertised speed'), color: C.bad, faint: true });
+	var failed = shown.filter(function(t) { return t.status !== 'ok'; });
+	if (failed.length) legend.push({ name: _('test did not complete'), color: C.unknown });
+	var top = 0;
+	series.forEach(function(sr) { sr.points.forEach(function(p) { if (p[1] > top) top = p[1]; }); });
+	return {
+		/* A line every 20%, so that 80% has one, unless that would be a crowd. */
+		chart: { zero: true, suffix: percent ? '%' : '', tickStep: percent && top <= 200 ? 20 : null, series: series,
+			bands: percent ? [ { lo: null, hi: 80, color: C.bad } ] : [],
+			marks: failed.map(function(t) { return { ts: t.ts, color: C.unknown, bottom: true, label: _('%s · speed test did not complete').format(fmtTime(t.ts)) }; }) },
+		legend: legend, percent: percent, stretch: stretch, before: ST.tests.length - shown.length
+	};
+}
+
 /* ------------------------------------------------------------------ CSV -- */
 
 /* One CSV field. Text that a spreadsheet would run as a formula (=, +, -,
@@ -394,10 +518,16 @@ function niceTicks(lo, hi, n) {
 
 /* chartSVG({
  *   from, to: time range (epoch s); unit, title (for the description)
- *   series: [ { name, color, points: [ [ts, v|null], ... ], bars: bool } ]
+ *   series: [ { name, color, points: [ [ts, v|null], ... ], bars: bool,
+ *               dots: bool (a dot for every point, no line; a point may
+ *               carry its own description as a third element) } ]
+ *   suffix: text after each value on the axis ("%")
  *   bands:  [ { lo, hi, color } ]  shaded value ranges (limits)
  *   spans:  [ { from, to, color, label } ] shaded time ranges (outages)
- *   marks:  [ { ts, color, label } ] events, drawn as ticks at the top
+ *   marks:  [ { ts, color, label, bottom } ] events, drawn as ticks at the
+ *           top (bottom: true = at the bottom, clear of those)
+ *   tickStep: the distance between the lines of the value axis (default:
+ *           chosen to fit)
  *   gap:    seconds without a point after which a line breaks
  *   interval: seconds between checks (the width of a bar)
  * }) -> the chart as SVG text */
@@ -423,9 +553,14 @@ function chartSVG(o) {
 		parts.push(S('rect', { x: a, y: mt, width: Math.max(b - a, 2), height: H - mt - mb, fill: sp.color, 'fill-opacity': 0.25 },
 			[ S('title', {}, [ esc(sp.label) ]) ]));
 	});
-	niceTicks(lo, hi, 5).forEach(function(v) {
+	var ticks = niceTicks(lo, hi, 5);
+	if (o.tickStep) {
+		ticks = [];
+		for (var tv = Math.ceil(lo / o.tickStep) * o.tickStep; tv <= hi + 1e-9; tv += o.tickStep) ticks.push(tv);
+	}
+	ticks.forEach(function(v) {
 		parts.push(S('line', { x1: ml, x2: W - mr, y1: y(v), y2: y(v), stroke: 'currentColor', 'stroke-opacity': 0.12 }));
-		parts.push(S('text', { x: ml - 6, y: y(v) + 4, 'text-anchor': 'end', 'font-size': 11, fill: 'currentColor' }, [ esc(v) ]));
+		parts.push(S('text', { x: ml - 6, y: y(v) + 4, 'text-anchor': 'end', 'font-size': 11, fill: 'currentColor' }, [ esc(v + (o.suffix || '')) ]));
 	});
 	var span = o.to - o.from, step = span > 3 * 86400 ? 86400 : span > 86400 ? 6 * 3600 : span > 8 * 3600 ? 3 * 3600 : span > 3 * 3600 ? 3600 : 1800;
 	var t0 = new Date(o.from * 1000);
@@ -450,6 +585,14 @@ function chartSVG(o) {
 			});
 			return;
 		}
+		if (s.dots) {
+			s.points.forEach(function(p) {
+				if (p[1] == null) return;
+				parts.push(S('circle', { cx: x(p[0]), cy: y(p[1]), r: 3, fill: s.color, 'fill-opacity': 0.85 },
+					[ S('title', {}, [ esc(p[2] || '%s · %s: %s'.format(fmtTime(p[0]), s.name, String(p[1]))) ]) ]));
+			});
+			return;
+		}
 		var d = '', prev = null, pts = s.points;
 		var joined = function(a, b) { return a && b && a[1] != null && b[1] != null && !(o.gap && b[0] - a[0] > o.gap); };
 		pts.forEach(function(p, i) {
@@ -466,7 +609,7 @@ function chartSVG(o) {
 			[ S('title', {}, [ esc(s.name) ]) ]));
 	});
 	(o.marks || []).forEach(function(m) {
-		parts.push(S('line', { x1: x(m.ts), x2: x(m.ts), y1: mt - 2, y2: mt + 10, stroke: m.color, 'stroke-width': 2 },
+		parts.push(S('line', { x1: x(m.ts), x2: x(m.ts), y1: m.bottom ? H - mb - 12 : mt - 2, y2: m.bottom ? H - mb : mt + 10, stroke: m.color, 'stroke-width': 2 },
 			[ S('title', {}, [ esc(m.label) ]) ]));
 	});
 	return S('svg', { xmlns: SVGNS, viewBox: '0 0 ' + W + ' ' + H, width: '100%', role: 'img', 'class': 'mh-chart', 'aria-label': o.title || '' }, parts);
@@ -495,5 +638,6 @@ return baseclass.extend({
 	parseCSV: parseCSV, load: load, loadDigest: loadDigest, analyse: analyse, toCSV: toCSV, csvField: csvField, esc: esc,
 	fmtTime: fmtTime, isoTime: isoTime, fmtShort: fmtShort, fmtDuration: fmtDuration, fmtNum: fmtNum, fmtInt: fmtInt, fmtLimit: fmtLimit,
 	LEVEL_TEXT: LEVEL_TEXT, reasonText: reasonText, groupReasons: groupReasons, groupedText: groupedText,
+	nOf: nOf, fmtMbps: fmtMbps, speedDirections: speedDirections, speedSentences: speedSentences, speedChart: speedChart,
 	chartSVG: chartSVG, lineChart: lineChart, legend: legend
 });

@@ -67,13 +67,19 @@
 	var H, mh, rb, ctx, data;
 	try {
 		ctx = JSON.parse($('mh-ctx').textContent);
-		data = { readings: stored('mh-readings'), channels: stored('mh-channels'), events: stored('mh-events'), channelmap: $('mh-channelmap').textContent };
+		data = { readings: stored('mh-readings'), channels: stored('mh-channels'), events: stored('mh-events'), channelmap: $('mh-channelmap').textContent,
+			/* ISPy's speed tests, when the router had any. */
+			speed: $('mh-speedtests') ? stored('mh-speedtests') : null };
 		var rpc = { declare: function(o) {
 			return function(since, until) {
 				if (o.method !== 'data')
 					return Promise.reject(new Error('not connected to the router'));
-				return Promise.resolve({ readings: between(data.readings, since, until), channels: between(data.channels, since, until),
-					events: between(data.events, since, until), channelmap: data.channelmap });
+				var d = { readings: between(data.readings, since, until), channels: between(data.channels, since, until),
+					events: between(data.events, since, until), channelmap: data.channelmap };
+				if (data.speed)
+					d.speed = { plan_down: (ctx.speed || {}).plan_down, plan_up: (ctx.speed || {}).plan_up,
+						tests: data.speed.head + '\n' + data.speed.rows.filter(function(l, i) { return data.speed.ts[i] >= since && data.speed.ts[i] <= until; }).join('\n') + '\n' };
+				return Promise.resolve(d);
 			};
 		} };
 		H = window.MH_MODULES.health(baseclass);
