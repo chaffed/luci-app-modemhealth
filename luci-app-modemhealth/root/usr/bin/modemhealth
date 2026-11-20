@@ -3,6 +3,7 @@
 #
 #   modemhealth check   read the modem once and store the reading
 #   modemhealth last    print the latest stored reading
+#   modemhealth logout  end the modem session kept between checks
 #
 # Supported modems: ARRIS/Vantiva SURFboard S33 and S34 (HNAP, HMAC-SHA256).
 # The modem reader (the "modem_*" functions) only logs in and turns replies
@@ -131,6 +132,48 @@ modem_logout() {
 	return 0
 }
 
+# One session is kept between checks (in RAM, root only): every login adds
+# an entry to the modem's 100-entry event log, so logging in on every check
+# would push the line's real events out of it.
+session_load() {
+	PRIVATE_KEY=; SESSION_UID=
+	[ -s "$RUN_DIR/session" ] || return 1
+	# Settings changed since the session began: it may be for another
+	# modem, user or password.
+	if [ /etc/config/$CONFIG -nt "$RUN_DIR/session" ]; then session_drop; return 1; fi
+	{ read -r PRIVATE_KEY; read -r SESSION_UID; } < "$RUN_DIR/session"
+	[ -n "$PRIVATE_KEY" ] && [ -n "$SESSION_UID" ] && return 0
+	session_drop
+	return 1
+}
+
+session_save() {
+	( umask 077; printf '%s\n%s\n' "$PRIVATE_KEY" "$SESSION_UID" > "$RUN_DIR/session" )
+}
+
+session_drop() {
+	rm -f "$RUN_DIR/session"
+	PRIVATE_KEY=; SESSION_UID=
+}
+
+# Reads the status with the kept session, logging in (again) only when
+# there is none or the modem no longer accepts it.
+modem_read_with_session() {
+	if session_load; then
+		modem_read_status && return 0
+		case $FAIL_REASON in
+			unreachable|timeout|tls_error|no_openssl|curl_error_*) return 1 ;;
+		esac
+		log "modem session no longer accepted ($FAIL_REASON); logging in again"
+		session_drop
+	fi
+	FAIL_REASON=
+	modem_login || return 1
+	session_save
+	log "new modem session"
+	modem_read_status
+}
+
 # Reads all status pages in one request into $RUN_DIR/status.json.
 modem_read_status() {
 	local body="" a rc out="$RUN_DIR/status.json" result
@@ -199,15 +242,14 @@ do_check() {
 	ts=$(date +%s)
 	FAIL_REASON=
 
-	if ! modem_login || ! modem_read_status; then
-		modem_logout
+	if ! modem_read_with_session; then
+		[ "$FAIL_REASON" = login_refused ] && session_drop
 		store_failed "$ts" "$FAIL_REASON"
 		rm -f "$RUN_DIR/status.json"
 		log "check failed: $FAIL_REASON"
 		echo "failed: $FAIL_REASON"
 		return 1
 	fi
-	modem_logout
 
 	ds=$(status_field GetCustomerStatusDownstreamChannelInfo CustomerConnDownstreamChannel)
 	us=$(status_field GetCustomerStatusUpstreamChannelInfo CustomerConnUpstreamChannel)
@@ -233,17 +275,28 @@ do_check() {
 	echo "ok: $model, $ds_n downstream and $us_n upstream channels, up ${uptime}s"
 }
 
+do_logout() {
+	load_config
+	mkdir -p "$RUN_DIR" && chmod 700 "$RUN_DIR"
+	session_load && modem_logout
+	session_drop
+}
+
 do_last() {
 	load_config
 	[ -s "$DATA_DIR/readings.csv" ] || { echo "no readings yet"; return 1; }
 	tail -n 1 "$DATA_DIR/readings.csv"
 }
 
+# MODEMHEALTH_LIB=1: only define the functions (for probes and tests).
+[ "${MODEMHEALTH_LIB:-}" = 1 ] && return 0 2>/dev/null
+
 case "$1" in
 	check) do_check ;;
 	last) do_last ;;
+	logout) do_logout ;;
 	*)
-		echo "usage: modemhealth check|last" >&2
+		echo "usage: modemhealth check|last|logout" >&2
 		exit 2
 		;;
 esac

@@ -57,16 +57,22 @@ def config(host, password, data_dir):
 
 
 def run_in_openwrt(out, scenarios):
-    """scenarios: list of (name, config text, shell run before the check)"""
+    """scenarios: (name, config text, shell before, [shell after, [command]]);
+    the command defaults to `modemhealth check`"""
     script = ["set -u", "cp -R /pkg/. /", "chmod 755 /usr/bin/modemhealth", "mkdir -p /var/run"]
-    for name, cfg, before in scenarios:
+    for scenario in scenarios:
+        name, cfg, before = scenario[:3]
+        after = scenario[3] if len(scenario) > 3 else ":"
+        command = scenario[4] if len(scenario) > 4 else "modemhealth check"
         with open(os.path.join(out, name + ".uci"), "w") as f:
             f.write(cfg)
         script += [
+            "rm -rf /var/run/modemhealth",  # each scenario starts without a session
             "mkdir -p /out/%s" % name,
             "cp /out/%s.uci /etc/config/modemhealth" % name,
             before,
-            "modemhealth check > /out/%s/output.txt 2>&1; echo $? > /out/%s/exit" % (name, name),
+            "%s > /out/%s/output.txt 2>&1; echo $? > /out/%s/exit" % (command, name, name),
+            after,
             "curl -sk https://modem:%d/_control/state > /out/%s/modem_state.json" % (PORT, name),
             "curl -sk https://modem:%d/_control/reset > /dev/null" % PORT,
         ]
@@ -135,8 +141,32 @@ def main():
             # The router's clock stepped back a minute since the last check
             # (simulated by a last check made a minute in the future).
             ("clock_back", config(host, PASSWORD, "/out/clock_back/data"),
-             "f=$(( $(date +%%s) * 1000 + 60000 )); echo $f > /var/run/modemhealth/last_ms; "
+             "mkdir -p /var/run/modemhealth; f=$(( $(date +%%s) * 1000 + 60000 )); echo $f > /var/run/modemhealth/last_ms; "
              "curl -sk \"https://modem:%d/_control/set?last_ts=$f\" >/dev/null" % PORT),
+            # One session across checks: the modem sees one login.
+            ("reuse", config(host, PASSWORD, "/out/reuse/data"),
+             "modemhealth check >/dev/null; modemhealth check >/dev/null",
+             "ls -l /var/run/modemhealth/session > /out/reuse/session_ls; "
+             "cat /var/run/modemhealth/session > /out/reuse/session_copy"),
+            # The modem forgets the session: log in again, no failure stored.
+            ("expired", config(host, PASSWORD, "/out/expired/data"),
+             "modemhealth check >/dev/null; curl -sk \"https://modem:%d/_control/set?expire=1\" >/dev/null" % PORT),
+            # Password changed on the modem while a session was kept: one
+            # refused login, stored as such, and no retry loop.
+            ("expired_wrong_password", config(host, PASSWORD, "/out/expired_wrong_password/data"),
+             "modemhealth check >/dev/null; "
+             "curl -sk \"https://modem:%d/_control/set?expire=1&password=changed\" >/dev/null" % PORT,
+             "test -e /var/run/modemhealth/session && echo kept > /out/expired_wrong_password/session_state || "
+             "echo dropped > /out/expired_wrong_password/session_state"),
+            # Settings saved after the session began: start a new session.
+            ("settings_changed", config(host, PASSWORD, "/out/settings_changed/data"),
+             "modemhealth check >/dev/null; sleep 1; touch /etc/config/modemhealth"),
+            # modemhealth logout ends the kept session.
+            ("logout", config(host, PASSWORD, "/out/logout/data"),
+             "modemhealth check >/dev/null",
+             "test -e /var/run/modemhealth/session && echo kept > /out/logout/session_state || "
+             "echo dropped > /out/logout/session_state",
+             "modemhealth logout"),
         ])
 
         # ------------------------------------------------------------ good
@@ -147,7 +177,7 @@ def main():
         check(state["bad_signatures"] == 0, "good: every HNAP_AUTH signature verified by the fake modem")
         check(state["logins"] == 1 and state["login_failures"] == 0, "good: logged in once with the password proof")
         check(state["status_reads"] == 1, "good: read all status pages in one request")
-        check(state["logouts"] == 1, "good: logged out afterwards")
+        check(state["logouts"] == 0, "good: the session is kept for the next check, not logged out")
 
         readings = read_csv(os.path.join(d, "data", "readings.csv"))
         check(len(readings) == 1, "good: one reading stored")
@@ -211,6 +241,43 @@ def main():
               "clock_back: check still ok after the router clock went back (got %s)" % (readings[0]["reason"] if readings else "none"))
         good_state = json.load(open(os.path.join(out, "good", "modem_state.json")))
         check(good_state["stale_timestamps"] == 0, "good: no stale timestamps")
+
+        # ---------------------------------------------------------- sessions
+        def scenario(name):
+            d = os.path.join(out, name)
+            return (json.load(open(os.path.join(d, "modem_state.json"))),
+                    read_csv(os.path.join(d, "data", "readings.csv")) if os.path.exists(os.path.join(d, "data", "readings.csv")) else [])
+
+        state, readings = scenario("reuse")
+        check([r["result"] for r in readings] == ["ok"] * 3, "reuse: three checks ok")
+        check(state["logins"] == 1 and state["status_reads"] == 3 and state["logouts"] == 0,
+              "reuse: one login for three checks (logins %d, reads %d)" % (state["logins"], state["status_reads"]))
+        ls = open(os.path.join(out, "reuse", "session_ls")).read()
+        check(ls.startswith("-rw------- ") and " root " in ls, "reuse: the session file is root only")
+        session_text = open(os.path.join(out, "reuse", "session_copy")).read()
+        check(PASSWORD not in session_text and "Pa ss" not in session_text, "reuse: the session file holds no password")
+        check(not os.path.exists(os.path.join(out, "reuse", "data", "session")), "reuse: the session is not kept in the data folder (flash)")
+
+        state, readings = scenario("expired")
+        check([r["result"] for r in readings] == ["ok", "ok"], "expired: the check after expiry is ok, no failure stored")
+        check(state["logins"] == 2 and state["status_reads"] == 2 and state["unauthorised"] == 1,
+              "expired: the modem answered 404 once; logged in again and read the status")
+
+        state, readings = scenario("expired_wrong_password")
+        check([(r["result"], r["reason"]) for r in readings] == [("ok", ""), ("failed", "login_refused")],
+              "expired_wrong_password: stored as a refused login")
+        check(state["login_failures"] == 1 and state["logins"] == 1, "expired_wrong_password: exactly one failed login, no retry loop")
+        check(open(os.path.join(out, "expired_wrong_password", "session_state")).read().strip() == "dropped",
+              "expired_wrong_password: the dead session is dropped")
+
+        state, readings = scenario("settings_changed")
+        check([r["result"] for r in readings] == ["ok", "ok"] and state["logins"] == 2,
+              "settings_changed: new settings start a new session")
+
+        state, _ = scenario("logout")
+        check(open(os.path.join(out, "logout", "exit")).read().strip() == "0" and state["logouts"] == 1,
+              "logout: modemhealth logout ends the session at the modem")
+        check(open(os.path.join(out, "logout", "session_state")).read().strip() == "dropped", "logout: the session file is removed")
 
         # ----------------------------------------------------------- secrecy
         for name in ("good", "wrong_password", "unreachable"):
