@@ -24,7 +24,7 @@ cp -R "$SRC/root/." "$WORK/data/"
 [ -d "$SRC/htdocs" ] && cp -R "$SRC/htdocs/." "$WORK/data/www/"
 find "$WORK/data" -type f -exec chmod 644 {} +
 find "$WORK/data" -type d -exec chmod 755 {} +
-chmod 755 "$WORK/data/usr/bin/modemhealth"
+chmod 755 "$WORK/data/usr/bin/modemhealth" "$WORK/data/etc/init.d/modemhealth" "$WORK/data/etc/uci-defaults/"*
 # The config holds the modem password: root only.
 chmod 600 "$WORK/data/etc/config/modemhealth"
 rmdir "$WORK/data/www" 2>/dev/null || true
@@ -50,11 +50,20 @@ echo "/etc/config/modemhealth" > "$WORK/control/conffiles"
 cat > "$WORK/control/postinst" <<'POST'
 #!/bin/sh
 [ -n "$IPKG_INSTROOT" ] && exit 0
-# The config holds the modem password: keep it root only, also on upgrade.
-chmod 600 /etc/config/modemhealth 2>/dev/null
+for f in /etc/uci-defaults/80_modemhealth; do
+	[ -f "$f" ] && ( . "$f" ) && rm -f "$f"
+done
 exit 0
 POST
-chmod 755 "$WORK/control/postinst"
+cat > "$WORK/control/prerm" <<'PRERM'
+#!/bin/sh
+[ -n "$IPKG_INSTROOT" ] && exit 0
+/etc/init.d/modemhealth stop 2>/dev/null
+/etc/init.d/modemhealth disable 2>/dev/null
+/usr/bin/modemhealth logout 2>/dev/null
+exit 0
+PRERM
+chmod 755 "$WORK/control/postinst" "$WORK/control/prerm"
 
 # GNU tar and bsdtar spell "owned by root" differently.
 if tar --version 2>/dev/null | grep -q GNU; then

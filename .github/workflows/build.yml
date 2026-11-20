@@ -17,7 +17,10 @@ jobs:
 
       - name: Lint shell scripts
         run: |
-          shellcheck luci-app-modemhealth/root/usr/bin/modemhealth scripts/*.sh
+          shellcheck luci-app-modemhealth/root/usr/bin/modemhealth \
+            luci-app-modemhealth/root/etc/init.d/modemhealth \
+            luci-app-modemhealth/root/etc/uci-defaults/* \
+            scripts/*.sh
 
       - name: Check Python syntax
         run: python3 -m py_compile tests/*.py tools/*.py
@@ -46,7 +49,9 @@ jobs:
             opkg install /dist/*.ipk
             ls -l /etc/config/modemhealth | grep -q "^-rw------- "
             modemhealth check || true
-            grep -q ",failed,no_password," /etc/modemhealth/readings.csv'
+            grep -q ",failed,no_password," /etc/modemhealth/readings/*.csv
+            test -x /etc/init.d/modemhealth
+            ls /etc/rc.d/ | grep -q modemhealth'
 
       - uses: actions/upload-artifact@v4
         with:
