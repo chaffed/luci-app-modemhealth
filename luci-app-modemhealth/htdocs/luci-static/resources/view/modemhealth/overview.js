@@ -219,7 +219,7 @@ return view.extend({
 		setTimeout(function() { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
 	},
 
-	renderStatus: function(st, D) {
+	renderStatus: function(st, D, redraw) {
 		var self = this;
 		var last = D.readings[D.readings.length - 1];
 		var lastV = last ? last.verdict : null;
@@ -242,7 +242,8 @@ return view.extend({
 					E('p', {}, [ last ? _('Last check: %s.').format(mh.fmtTime(+last.ts)) : _('No checks yet.'), ' ', sched ]),
 					listOrNone(lastReasons, lastV && lastV.level === 'healthy' ? _('All channels within spec.') : ''),
 					E('button', { 'class': 'cbi-button cbi-button-action', 'click': ui.createHandlerFn(this, function() {
-						return mh.callCheck().then(function() { location.reload(); });
+						/* The call answers with the status after the check. */
+						return mh.callCheck().then(redraw);
 					}) }, [ _('Check now') ])
 				]),
 				E('div', {}, [
@@ -263,7 +264,8 @@ return view.extend({
 	render: function(st) {
 		var self = this;
 		var root = E('div', {}, [ E('style', {}, [ CSS ]), E('h2', {}, [ _('Modem Health') ]), E('div', { 'class': 'spinning' }, [ _('Loading…') ]) ]);
-		var draw = function() {
+		var draw = function(newStatus) {
+			if (newStatus && newStatus.now) st = newStatus;
 			return self.loadPeriod(st).then(function(D) {
 				var latest = D.readings.filter(function(r) { return r.result === 'ok'; }).pop();
 				var lv = latest ? latest.verdict : { channels: [] };
@@ -284,7 +286,7 @@ return view.extend({
 					].map(function(k) {
 						return E('button', { 'class': 'cbi-button', 'style': 'margin-left:.3em', 'click': function() { self.download(D, k[0]); } }, [ k[1] ]);
 					}))),
-					self.renderStatus(st, D),
+					self.renderStatus(st, D, draw),
 					D.changedLimits.length ? E('div', { 'class': 'alert-message notice' }, [
 						_('Judged against limits you changed in Settings: %s. The others are Modem Health\'s sourced defaults.')
 							.format(D.changedLimits.map(function(c) { return c.limit.label; }).join('; '))
