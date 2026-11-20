@@ -147,7 +147,7 @@ def main():
             ("reuse", config(host, PASSWORD, "/out/reuse/data"),
              "modemhealth check >/dev/null; modemhealth check >/dev/null",
              "ls -l /var/run/modemhealth/session > /out/reuse/session_ls; "
-             "cp /var/run/modemhealth/session /out/reuse/session_copy"),
+             "cat /var/run/modemhealth/session > /out/reuse/session_copy"),
             # The modem forgets the session: log in again, no failure stored.
             ("expired", config(host, PASSWORD, "/out/expired/data"),
              "modemhealth check >/dev/null; curl -sk \"https://modem:%d/_control/set?expire=1\" >/dev/null" % PORT),
