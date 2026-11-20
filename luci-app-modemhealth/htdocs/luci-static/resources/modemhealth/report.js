@@ -108,7 +108,7 @@ function list(items) {
 
 function legend(items) {
 	return '<p class="legend">' + items.map(function(i) {
-		return '<span><i style="background:' + esc(i.color) + '"></i>' + esc(i.name) + '</span>';
+		return '<span><i style="background:' + esc(i.color) + (i.faint ? ';opacity:.35' : '') + '"></i>' + esc(i.name) + '</span>';
 	}).join('') + '</p>';
 }
 
@@ -184,6 +184,8 @@ var css = [
  *   generated: when (epoch s, the router's clock); version: Modem Health's
  *   times: false leaves out the list of every event's time
  * }
+ * With ISPy's speed tests in the digest (G.speedTests), the report gains a
+ * section that sets them against the line's problems.
  * -> { body, page(), findings: [ { level, text } ], preliminary, level } */
 function build(G, o) {
 	o = o || {};
@@ -236,6 +238,13 @@ function build(G, o) {
 	if (failed.length)
 		say('info', _('%s could not read the modem and %s counted as unknown, not as a fault of the line.')
 			.format(n(failed.length, _('check'), _('checks')), failed.length === 1 ? _('is') : _('are')));
+	/* ISPy's speed tests, lined up with the above (null: ISPy has none). */
+	var ST = G.speedTests || null, sc = ST ? ST.counts : null, win = ST ? Math.round(ST.windowS / 60) : 0;
+	if (ST && sc.slow.total)
+		say('info', _('%d of %s started within %d minutes of a line problem the modem recorded%s%s (section 5).').format(sc.slow.problem,
+			n(sc.slow.total, _('slow speed test'), _('slow speed tests')), win,
+			sc.slow.unknown ? _(' (for %d it is not known: no check read the modem then)').format(sc.slow.unknown) : '',
+			sc.fine.total ? _('; so did %d of %s').format(sc.fine.problem, n(sc.fine.total, _('test that was not slow'), _('tests that were not slow'))) : ''));
 
 	var problems = findings.filter(function(f) { return f.level === 'bad' || f.level === 'marginal'; }).length;
 	var level = P.level, headline;
@@ -388,9 +397,25 @@ function build(G, o) {
 		})) + (troubled.length > 12 ? '<p class="note">' + esc(_('The 12 channels with the most checks out of spec, of %d with any remark.').format(troubled.length)) + '</p>' : '')
 		: '<p>' + esc(_('No channel had a value outside the good range at any check.')) + '</p>';
 
-	var charts = '';
+	/* The time axis every chart shares, with the outages shaded and a tick
+	 * for each stretch that had events. */
+	var charts = '', MAX = 350, to = G.until;
+	var from = first != null ? Math.max(G.since, first - Math.max((G.until - first) * 0.03, 300)) : G.since;
+	var slotW = Math.max((to - from) / 330, 1), marked = {};
+	disruptive.forEach(function(e) { var k = Math.floor((e.ts - from) / slotW); marked[k] = (marked[k] || 0) + 1; });
+	var marks = Object.keys(marked).map(function(k) {
+		return { ts: from + (+k + 0.5) * slotW, color: mh.C.bad, label: _('%s around %s').format(n(marked[k], _('event'), _('events')), mh.fmtTime(from + (+k + 0.5) * slotW)) };
+	});
+	reboots.forEach(function(r) { marks.push({ ts: +r.boot_ts || +r.ts, color: '#8e44ad', label: _('Modem restarted') }); });
+	var common = { from: from, to: to, marks: marks,
+		spans: outages.map(function(x) { return { from: x.start - 60, to: (x.end || x.start) + 60, color: mh.C.bad, label: _('Outage, %s').format(mh.fmtTime(x.start)) }; }) };
+	var fig = function(title, note, opt, leg) {
+		opt.title = title;
+		Object.keys(common).forEach(function(k) { if (opt[k] == null) opt[k] = common[k]; });
+		return '<figure><figcaption>' + esc(title) + '</figcaption><p class="note">' + esc(note) + '</p>' + legend(leg) + mh.chartSVG(opt) + '</figure>';
+	};
+	var chartKey = _('Red shading: an outage. Red ticks at the top: losses of sync and time-outs. Purple ticks: modem restarts.');
 	if (good.length) {
-		var from = Math.max(G.since, first - Math.max((G.until - first) * 0.03, 300)), to = G.until, MAX = 350;
 		var pts = function(f) { return R.map(function(r) { return [ +r.ts, r.result === 'ok' && r.agg ? f(r.agg) : null ]; }); };
 		var W = null, cut = function(f, agg) {
 			var s = slots(pts(f), from, to, MAX, agg);
@@ -409,22 +434,10 @@ function build(G, o) {
 				points: cut(function(a) { return a.us[id] != null ? a.us[id] : null; }, highest) };
 		});
 		var step = W || interval * 60;
-		/* One tick for each stretch of the chart that had events. */
-		var slotW = Math.max((to - from) / 330, 1), marked = {};
-		disruptive.forEach(function(e) { var k = Math.floor((e.ts - from) / slotW); marked[k] = (marked[k] || 0) + 1; });
-		var marks = Object.keys(marked).map(function(k) {
-			return { ts: from + (+k + 0.5) * slotW, color: mh.C.bad, label: _('%s around %s').format(n(marked[k], _('event'), _('events')), mh.fmtTime(from + (+k + 0.5) * slotW)) };
-		});
-		reboots.forEach(function(r) { marks.push({ ts: +r.boot_ts || +r.ts, color: '#8e44ad', label: _('Modem restarted') }); });
-		var common = { from: from, to: to, gap: Math.max(step * 3, 900), interval: step, marks: marks,
-			spans: outages.map(function(x) { return { from: x.start - 60, to: (x.end || x.start) + 60, color: mh.C.bad, label: _('Outage, %s').format(mh.fmtTime(x.start)) }; }) };
+		common.gap = Math.max(step * 3, 900);
+		common.interval = step;
 		var bands = function(limit) {
 			return limit && limit.good ? [ { lo: limit.marginal[0], hi: limit.marginal[1], color: mh.C.marginal }, { lo: limit.good[0], hi: limit.good[1], color: mh.C.good } ] : [];
-		};
-		var fig = function(title, note, opt, leg) {
-			opt.title = title;
-			Object.keys(common).forEach(function(k) { opt[k] = common[k]; });
-			return '<figure><figcaption>' + esc(title) + '</figcaption><p class="note">' + esc(note) + '</p>' + legend(leg) + mh.chartSVG(opt) + '</figure>';
 		};
 		var per = W ? _(' Each point stands for %s: the worst value of that stretch.').format(mh.fmtDuration(W)) : '';
 		charts = fig(_('Downstream power (dBmV)'), _('Lowest and highest SC-QAM channel at each check.') + per,
@@ -438,7 +451,85 @@ function build(G, o) {
 			fig(_('Uncorrectable codewords'), W ? _('Lost data across all downstream channels, added up over each %s.').format(mh.fmtDuration(W))
 					: _('Lost data across all downstream channels since the check before.'),
 				{ zero: true, series: [ { name: _('uncorrectable'), color: mh.C.bad, points: series.unc, bars: true } ] }, [ { name: _('uncorrectable'), color: mh.C.bad } ]) +
-			'<p class="note">' + esc(_('Green: the good range. Amber: acceptable. Red shading: an outage. Red ticks at the top: losses of sync and time-outs. Purple ticks: modem restarts. A break in a line: no check, or a check that could not read the modem.')) + '</p>';
+			'<p class="note">' + esc(_('Green: the good range. Amber: acceptable.') + ' ' + chartKey + ' ' + _('A break in a line: no check, or a check that could not read the modem.')) + '</p>';
+	}
+
+	/* ---------------------------------------------------- 5 speed tests */
+	var speedHtml = '';
+	if (ST) {
+		var groups = [ [ 'slow', _('Slow tests') ], [ 'fine', _('Tests that were not slow') ], [ 'unjudged', _('Tests') ], [ 'failed', _('Tests that did not complete') ] ]
+			.filter(function(g) { return sc[g[0]].total; });
+		var STATE = {
+			outage: _('An outage (no internet)'),
+			events: _('A loss of sync or time-out in the modem\'s log'),
+			out_of_spec: _('A signal value out of spec'),
+			marginal: _('A signal value outside the good range, but within spec'),
+			clear: _('Nothing: the checks around the test found every value good'),
+			unknown: _('Not known: no check read the modem then')
+		};
+		var across = function(label, key, cls) {
+			return { cls: cls, cells: [ label ].concat(groups.map(function(g) { return sc[g[0]][key]; })) };
+		};
+		var stateRows = [];
+		H.LINE_STATES.forEach(function(k) {
+			stateRows.push(across(STATE[k], k));
+			if (k === 'out_of_spec') stateRows.push(across(_('A line problem (the three above together)'), 'problem', 'total'));
+		});
+		stateRows.push(across(_('All tests'), 'total', 'total'));
+		var judgedOn = mh.speedDirections(ST), ran = ST.n - sc.failed.total;
+		var advertised = [ ST.plan.down ? _('%s download').format(mh.fmtMbps(ST.plan.down)) : '', ST.plan.up ? _('%s upload').format(mh.fmtMbps(ST.plan.up)) : '' ].filter(Boolean).join(', ');
+		var intro = _('Speed was measured by ISPy, a separate app on the same router, which ran %s in this period%s.')
+			.format(n(ST.n, _('speed test'), _('speed tests')), sc.failed.total ? _(', of which %d did not complete').format(sc.failed.total) : '') + ' ' +
+			(advertised
+				? _('A test is called slow when its %s speed was below 80%% of the advertised speed set in ISPy (%s).').format(judgedOn, advertised)
+				: _('No advertised speed is set in ISPy, so no test is called slow or not slow here.')) + ' ' +
+			_('Each test is set against what the modem recorded within %d minutes of the moment the test started.').format(win);
+		var speedFacts = [];
+		if (advertised && ran) {
+			speedFacts.push(sc.slow.total
+				? _('%s: %d started within %d minutes of a line problem, %d did not%s.').format(n(sc.slow.total, _('slow test'), _('slow tests')), sc.slow.problem, win,
+					sc.slow.total - sc.slow.problem - sc.slow.unknown, sc.slow.unknown ? _(', and for %d it is not known').format(sc.slow.unknown) : '')
+				: _('No test was slow.'));
+			if (sc.fine.total)
+				speedFacts.push(_('%s: %d started within %d minutes of a line problem, %d did not%s.').format(n(sc.fine.total, _('test that was not slow'), _('tests that were not slow')), sc.fine.problem, win,
+					sc.fine.total - sc.fine.problem - sc.fine.unknown, sc.fine.unknown ? _(', and for %d it is not known').format(sc.fine.unknown) : ''));
+		}
+		if (sc.failed.total)
+			speedFacts.push(_('%s: %d within %d minutes of a line problem. A test that did not complete is not counted as slow.')
+				.format(n(sc.failed.total, _('test that did not complete'), _('tests that did not complete')), sc.failed.problem, win));
+		var chart = mh.speedChart(ST, { from: from, to: to, max: MAX });
+		var speedFig = fig(chart.percent ? _('Speed tests (percent of the advertised speed)') : _('Speed tests (Mbit/s)'),
+			_('Each dot is one test, at the time it started.') + (chart.stretch ? ' ' + _('Where tests are too close together to draw, the slowest of each %s is shown.').format(mh.fmtDuration(chart.stretch)) : '') +
+				(chart.before ? ' ' + _('%s from before the first check of the modem are in the table but not in this chart.').format(n(chart.before, _('test'), _('tests'))) : ''),
+			{ zero: true, suffix: chart.chart.suffix, tickStep: chart.chart.tickStep, series: chart.chart.series, bands: chart.chart.bands, marks: marks.concat(chart.chart.marks) }, chart.legend) +
+			'<p class="note">' + esc(chartKey + (chart.chart.marks.length ? ' ' + _('Grey ticks at the bottom: speed tests that did not complete.') : '')) + '</p>';
+		var slow = ST.tests.filter(function(t) { return t.group === 'slow'; }), SHOWN = 40;
+		var speedCell = function(v, share, isSlow) {
+			var text = mh.fmtMbps(v) + (share != null ? ' (%d%%)'.format(Math.round(share * 100)) : '');
+			return isSlow ? { html: '<span class="bad">' + esc(text) + '</span>' } : text;
+		};
+		/* What the modem lost at the time of a test: the uncorrectable
+		 * codewords of the first check that read the modem after the test
+		 * started. They are counted since the check before, so that count
+		 * covers the start of the test. Reported, not judged. */
+		var lostAt = function(ts) {
+			var lo = 0, hi = good.length;
+			while (lo < hi) { var mid = (lo + hi) >> 1; if (+good[mid].ts < ts) lo = mid + 1; else hi = mid; }
+			var r = good[lo];
+			return r && +r.ts <= ts + ST.windowS && r.agg && r.agg.unc != null ? mh.fmtInt(r.agg.unc) : '–';
+		};
+		var slowHtml = slow.length ? '<h3>' + esc(_('The slow tests')) + '</h3>' +
+			table([ _('Test started'), _('Download'), _('Upload'), _('Within %d minutes, the modem recorded').format(win) ].concat(uncKnown ? [ _('Uncorrectable codewords at the next check') ] : []),
+				slow.slice(-SHOWN).map(function(t) {
+					return [ mh.fmtTime(t.ts), speedCell(t.down, t.downShare, t.slowDown), speedCell(t.up, t.upShare, t.slowUp), STATE[t.line] ].concat(uncKnown ? [ lostAt(t.ts) ] : []);
+				}), 'days') + '<p class="note">' + esc((slow.length > SHOWN ? _('The %d most recent of %d slow tests.').format(SHOWN, slow.length) + ' ' : '') +
+				_('In brackets: the share of the advertised speed.') + (uncKnown ? ' ' + _('Uncorrectable codewords: data the modem lost, as counted by the first check after the test started. That count runs from the check before it, so it covers the start of the test. It is reported, not judged: no published limit exists for it.') : '') +
+				' ' + _('ISPy\'s own report and results file hold every test.')) + '</p>' : '';
+		speedHtml = '<p>' + esc(intro) + '</p>' + (speedFacts.length ? list(speedFacts) : '') +
+			table([ _('Within %d minutes of the test, the modem recorded').format(win) ].concat(groups.map(function(g) { return g[1]; })), stateRows) +
+			'<p class="note">' + esc(_('Each test is counted once, in the first row that applies. A line problem is one of the first three rows; a value outside the good range but within spec is shown apart and not counted as one.')) + '</p>' +
+			'<p class="note">' + esc(_('This table shows what happened at the same time; that alone does not prove the cause. A test can also be slow because of the home network, the router\'s load or the test server; ISPy\'s own report deals with those.')) + '</p>' +
+			speedFig + slowHtml;
 	}
 
 	/* ------------------------------------------------- 5 how measured */
@@ -469,13 +560,16 @@ function build(G, o) {
 			_('One or two lost pings out of three are not an outage.'),
 			_('After more than 30 minutes without a check (the router was off, for example), an outage is not assumed to have gone on.'),
 			_('Uncorrectable codewords are reported but not judged, because no published limit exists for them.')
-		]) +
+		].concat(ST ? [
+			_('A speed test is credited, as in ISPy, with the higher of what the test measured and the traffic counted on the router\'s WAN port while it ran. A test that did not complete is not counted as slow, and a test with nothing recorded near it is counted as not known, never as during a line problem.')
+		] : [])) +
 		'<h3>' + esc(_('What the router can and cannot see')) + '</h3>' + list([
 			_('It sees what the modem reports at each check. Anything that came and went between two checks is not in the signal figures; the modem\'s event log covers that time.'),
 			_('The modem keeps only its last 100 log entries. The router copies new entries at every check, so entries are only lost if more than 100 were written between two checks or while the router was off.'),
 			_('Event times are the modem\'s own, corrected by the difference between its clock and the router\'s at the moment the router first saw the entry. The router\'s clock is set from the internet (NTP).'),
 			_('It does not see the provider\'s side of the line: the levels at the provider\'s equipment, the cause of a fault, or whether a fault is in the home or in the street.'),
-			_('It does not measure speed.')
+			ST ? _('It does not measure speed itself. The speed tests in section 5 were made by ISPy, a separate app on the same router, and are shown as ISPy recorded them.')
+				: _('It does not measure speed.')
 		]);
 
 	/* --------------------------------------------------- 6 statement */
@@ -493,7 +587,8 @@ function build(G, o) {
 		timesHtml + failedHtml +
 		'<h2>' + esc(_('4. Signal')) + '</h2>' + measuredHtml +
 		'<h3>' + esc(_('Channels with values outside the good range')) + '</h3>' + worstHtml + charts +
-		'<h2>' + esc(_('5. How this was measured')) + '</h2>' + how + statement +
+		(ST ? '<h2>' + esc(_('5. Speed tests and line problems')) + '</h2>' + speedHtml : '') +
+		'<h2>' + esc(ST ? _('6. How this was measured') : _('5. How this was measured')) + '</h2>' + how + statement +
 		'<footer>' + esc(_('This report states measurements taken by the customer\'s own equipment. It is not legal advice. Made by Modem Health%s (github.com/chaffed/luci-app-modemhealth).').format(o.version ? ' ' + o.version : '')) + '</footer>';
 
 	return {

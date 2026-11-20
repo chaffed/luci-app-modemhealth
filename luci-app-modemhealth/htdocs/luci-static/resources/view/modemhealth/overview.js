@@ -148,6 +148,23 @@ function charts(D) {
 		mh.lineChart(Object.assign({ title: _('Errors per check'), zero: true, series: [
 			{ name: _('uncorrectable'), color: mh.C.bad, points: seriesBy(D, 'ds', unc, sum), bars: true } ] }, common)),
 		mh.legend([ { name: _('uncorrectable'), color: mh.C.bad } ])));
+	/* ISPy's speed tests, when it has any, on the same time axis. */
+	var ST = D.speedTests;
+	if (ST) {
+		var sc = mh.speedChart(ST, { from: from, to: to });
+		out.push(E('div', { 'class': 'cbi-section', 'id': 'mh-speed' }, [
+			E('h3', {}, [ _('Speed tests (ISPy)') ]),
+			E('p', { 'class': 'mh-note' }, [ (sc.percent
+				? _('Each dot is one speed test by ISPy at the time it started, as a percentage of the advertised speed set in ISPy. In the red band at the bottom: slow.')
+				: _('Each dot is one speed test by ISPy at the time it started, in Mbit/s.')) + ' ' +
+				_('The outages and events of the charts above are marked here too, so the two can be compared.') ]),
+			mh.legend(sc.legend),
+			mh.lineChart(Object.assign({ title: _('Speed tests (ISPy)') }, common, sc.chart, { marks: marks.concat(sc.chart.marks) })),
+			E('ul', {}, mh.speedSentences(ST).map(function(t) { return E('li', {}, [ t ]); })),
+			E('p', { 'class': 'mh-note' }, [ _('A line problem here is an outage, a loss of sync or time-out in the modem\'s log, or a signal value out of spec. The Report page has the full count.') +
+				(sc.before ? ' ' + _('%s from before the first check of the modem are counted but not drawn.').format(mh.nOf(sc.before, _('test'), _('tests'))) : '') ])
+		]));
+	}
 	out.push(E('p', { 'class': 'mh-note' }, [ _('Red ticks at the top of each chart mark losses of sync and time-outs; purple ticks mark modem restarts. Hover for details.') ]));
 	return out;
 }

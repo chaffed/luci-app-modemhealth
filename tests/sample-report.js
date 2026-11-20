@@ -1,7 +1,8 @@
 /*
  * Builds the sample report in docs/ (sample-report.pdf) from a
- * generated two-week history of a line with faults: the report exactly as
- * the Report page makes it, printed by Chrome.
+ * generated two-week history of a line with faults, on a router that also
+ * runs ISPy: the report exactly as the Report page makes it, printed by
+ * Chrome.
  *
  *   npm install --no-save playwright-core
  *   node tests/sample-report.js [OUTDIR]     (default: docs)
@@ -41,7 +42,11 @@ var rpc = { declare: function() { return function(since, until) {
 		var l = t.split('\n').filter(Boolean);
 		return [ l[0] ].concat(l.slice(1).filter(function(r) { var ts = +r.split(',')[0]; return ts >= since && ts <= until; })).join('\n') + '\n';
 	};
-	return Promise.resolve({ readings: cut(all.readings), channels: cut(all.channels), events: cut(all.events), channelmap: made.files['channelmap.csv'] });
+	/* ISPy's speed tests of the same days, as the backend passes them on. */
+	var tests = made.ispy.results.split('\n').slice(1).filter(Boolean).map(function(l) { return l.split(','); })
+		.filter(function(f) { return f[11] !== 'skipped'; }).map(function(f) { return [ f[0], f[11], f[8], f[9], f[13], f[14] ].join(','); });
+	return Promise.resolve({ readings: cut(all.readings), channels: cut(all.channels), events: cut(all.events), channelmap: made.files['channelmap.csv'],
+		speed: { plan_down: String(made.ispy.plan_down), plan_up: String(made.ispy.plan_up), tests: cut('ts,status,down_mbps,up_mbps,wan_down_mbps,wan_up_mbps\n' + tests.join('\n') + '\n') } });
 }; } };
 var mh = new Function('baseclass', 'rpc', 'health', read('modemhealth/common.js'))(baseclass, rpc, health);
 var rb = new Function('baseclass', 'mh', read('modemhealth/report.js'))(baseclass, mh);

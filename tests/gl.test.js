@@ -208,6 +208,37 @@ async function main() {
 		await sleep(300);
 		await page.screenshot({ path: path.join(SHOTS, 'overview-dark.png') });
 
+		/* -------------------------------------------- ISPy's speed tests */
+		eq(await frame().evaluate(rig.speedSummary), null, 'speed tests: without ISPy the panel\'s overview says nothing about speed');
+		var want = rig.ispy(r);
+		var week = async function() {
+			await page.goto(rig.WEB + '/gl-panel.html');
+			await openOverview();
+			await F.locator('select.cbi-input-select').selectOption('7');
+			await frame().waitForFunction(function() { return /Last 7 days/.test((document.querySelector('.mh-summary') || {}).textContent || ''); }, null, { timeout: 60000 });
+			await sleep(300);
+		};
+		await week();
+		var sp = await frame().evaluate(rig.speedSummary);
+		await page.screenshot({ path: path.join(SHOTS, 'overview-speed.png'), fullPage: true });
+		eq([ sp.tests, sp.failed, sp.slow, sp.charts, sp.lines, sp.failedMarks ], [ want.tests, want.failed, want.slow, 5, 0, 1 ],
+			'speed tests: with ISPy\'s results on the router, the panel\'s overview counts and draws them (' + sp.items.join(' ') + ')');
+		/* The window follows the interval, which was set to 10 minutes above. */
+		ok(sp.slowInProblem >= 3 && sp.slowInProblem < sp.slow && sp.dots > 100 && sp.minutes === 10,
+			'speed tests: some of the slow tests fell within a line problem, not all (' + sp.slowInProblem + ' of ' + sp.slow + ', within ' + sp.minutes + ' minutes: the time between two checks as set)');
+		eq([ sp.xss[0] == null, sp.xss[1] ], [ true, 0 ], 'speed tests: markup in ISPy\'s file reaches no page');
+		await F.locator('.mhgl-nav button[data-page=report]').click();
+		rt = '';
+		for (k = 0; k < 300 && !/5\. Speed tests and line problems/.test(rt); k++) {
+			rt = await RF.locator('body').innerText().catch(function() { return ''; });
+			await sleep(200);
+		}
+		ok(new RegExp(sp.slowInProblem + ' of ' + sp.slow + ' slow speed tests started within 10 minutes of a line problem the modem recorded').test(rt) && /6\. How this was measured/.test(rt),
+			'speed tests: the report in the panel has the section, with the same counts');
+		rig.ispy(r, false);
+		await week();
+		eq([ await frame().evaluate(rig.speedSummary), await F.locator('svg.mh-chart').count() ], [ null, 4 ], 'speed tests: with ISPy gone the overview is as before');
+
 		/* ----------------------------------------------------- the panel's rules */
 		var calls = await page.evaluate(function() { return window.$requestLog.map(function(c) { return c.params[1] + '.' + c.params[2]; }); });
 		ok(calls.length > 2 && calls.every(function(c) { return /^modemhealth\.(get_status|get_data|get_config|check|test|set_config|set_password)$/.test(c); }),

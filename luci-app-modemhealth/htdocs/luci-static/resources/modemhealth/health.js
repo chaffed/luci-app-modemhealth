@@ -504,10 +504,97 @@ function periodVerdict(input, limits) {
 	return { level: level, reasons: reasons, counts: counts };
 }
 
+/* --------------------------------------------------------- speed tests -- */
+
+/* Speed is measured by ISPy, a separate app; Modem Health only lines its
+ * tests up with what the modem recorded. A test is slow by ISPy's own
+ * rule: below 80% of the advertised speed (the lowest of the bands the
+ * FCC's Measuring Broadband America reports used), in either direction
+ * that has an advertised speed set in ISPy. */
+var SLOW_BELOW = 0.8;
+
+/* What the modem recorded around a test, worst first. The first three are
+ * line problems; "marginal" (a value outside the good range but within
+ * spec) is told apart and not counted as one. */
+var LINE_STATES = [ 'outage', 'events', 'out_of_spec', 'marginal', 'clear', 'unknown' ];
+var LINE_PROBLEM = { outage: 1, events: 1, out_of_spec: 1 };
+
+/* First index in a list sorted by key() whose key is >= v. */
+function lowerBound(list, key, v) {
+	var lo = 0, hi = list.length;
+	while (lo < hi) { var m = (lo + hi) >> 1; if (key(list[m]) < v) lo = m + 1; else hi = m; }
+	return lo;
+}
+
+/* speedTests(tests, plan, line)
+ * tests: [ { ts, status, down, up } ]  ISPy's tests: ts is when the test
+ *        started, status ok or error (skipped tests are left out), down
+ *        and up the speeds ISPy credits the test with (Mbit/s).
+ * plan:  { down, up }  the advertised speeds set in ISPy (null: not set)
+ * line:  { readings: [ { ts, level } ], events: [ { ts, kind } ],
+ *          outages: [ { start, end } ], windowS }
+ * A test is lined up with what was recorded within windowS seconds of its
+ * start (the time between two checks): an outage, a disruptive entry in
+ * the modem's log, or the verdicts of the checks that read the modem. With
+ * no such check and nothing else, the line's state is unknown, never good.
+ * -> {
+ *   tests:   the tests, oldest first, each with group (slow | fine |
+ *            unjudged: no advertised speed | failed), line (LINE_STATES),
+ *            slowDown, slowUp, downShare, upShare (of the advertised speed)
+ *   counts:  { slow: { outage: n, ..., total, problem }, fine, unjudged, failed }
+ *   n, plan, windowS
+ * } */
+function speedTests(tests, plan, line) {
+	plan = plan || {};
+	var W = line.windowS || 300;
+	var ts = function(x) { return +x.ts; }, reach = function(o) { return o.end + W; };
+	var readings = (line.readings || []).slice().sort(function(a, b) { return a.ts - b.ts; });
+	var events = (line.events || []).filter(function(e) { return DISRUPTIVE[e.kind]; }).sort(function(a, b) { return a.ts - b.ts; });
+	/* Sorted by start, so also by end: outages do not overlap. */
+	var outs = (line.outages || []).slice().sort(function(a, b) { return a.start - b.start; });
+	var counts = {};
+	[ 'slow', 'fine', 'unjudged', 'failed' ].forEach(function(g) {
+		counts[g] = { total: 0, problem: 0 };
+		LINE_STATES.forEach(function(s) { counts[g][s] = 0; });
+	});
+	var out = (tests || []).filter(function(t) { return num(t.ts) != null && (t.status === 'ok' || t.status === 'error'); })
+		.sort(function(a, b) { return a.ts - b.ts; }).map(function(t) {
+			var at = +t.ts, r = { ts: at, status: t.status, down: num(t.down), up: num(t.up) };
+			if (t.status !== 'ok') { r.group = 'failed'; r.down = r.up = null; }
+			else {
+				r.downShare = plan.down && r.down != null ? r.down / plan.down : null;
+				r.upShare = plan.up && r.up != null ? r.up / plan.up : null;
+				r.slowDown = r.downShare != null && r.downShare < SLOW_BELOW;
+				r.slowUp = r.upShare != null && r.upShare < SLOW_BELOW;
+				r.group = r.downShare == null && r.upShare == null ? 'unjudged' : (r.slowDown || r.slowUp ? 'slow' : 'fine');
+			}
+			/* The first outage that had not ended W before the test. */
+			var i = lowerBound(outs, reach, at), level = null, n = 0;
+			if (i < outs.length && outs[i].start - W <= at) r.line = 'outage';
+			else {
+				i = lowerBound(events, ts, at - W);
+				if (i < events.length && events[i].ts <= at + W) r.line = 'events';
+			}
+			for (i = lowerBound(readings, ts, at - W); i < readings.length && +readings[i].ts <= at + W; i++) {
+				if (readings[i].level === UNKNOWN) continue;
+				n++;
+				level = level ? worse(level, readings[i].level) : readings[i].level;
+			}
+			if (!r.line)
+				r.line = !n ? 'unknown' : level === FAILING ? 'out_of_spec' : level === DEGRADED ? 'marginal' : 'clear';
+			counts[r.group][r.line]++;
+			counts[r.group].total++;
+			if (LINE_PROBLEM[r.line]) counts[r.group].problem++;
+			return r;
+		});
+	return { tests: out, counts: counts, n: out.length, plan: { down: plan.down || null, up: plan.up || null }, windowS: W };
+}
+
 return baseclass.extend({
 	GOOD: GOOD, MARGINAL: MARGINAL, BAD: BAD, UNKNOWN: UNKNOWN,
 	HEALTHY: HEALTHY, DEGRADED: DEGRADED, FAILING: FAILING,
 	SOURCES: SOURCES, LIMITS: LIMITS, DISRUPTIVE: DISRUPTIVE,
+	SLOW_BELOW: SLOW_BELOW, LINE_STATES: LINE_STATES, LINE_PROBLEM: LINE_PROBLEM, speedTests: speedTests,
 	num: num, band: band, limitsFor: limitsFor,
 	limitList: limitList, limitFields: limitFields, applySettings: applySettings,
 	channelVerdict: channelVerdict, readingVerdict: readingVerdict,

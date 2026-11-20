@@ -11,6 +11,12 @@
  * --hostile adds events and a model name containing markup, to prove no
  * page renders it. --good gives a line with nothing wrong: every value
  * within the good range, no events, no failed checks.
+ *
+ * make() also returns the results file of an ISPy on the same router (the
+ * speed tests of those days and one day more, in ISPy's own format): slow
+ * tests while the line had its problems, slow tests while it had none, a
+ * test that failed during the outage. It is not among the files of the
+ * history: ISPy keeps it elsewhere (see .ispy).
  */
 var fs = require('fs'), path = require('path');
 var FIX = path.join(__dirname, 'fixtures', 's34');
@@ -19,6 +25,7 @@ exports.READINGS = 'ts,result,reason,model,firmware,uptime_s,connectivity,boot,n
 exports.CHANNELS = 'ts,dir,channel_id,lock,power_dbmv,snr_db,corrected,uncorrectable';
 exports.EVENTS = 'first_seen_ts,modem_time,clock_offset_s,level,message';
 exports.CHANNELMAP = 'ts,dir,ch,channel_id,modulation,freq_hz,width_hz';
+exports.ISPY = 'ts,backend,server,ping_ms,jitter_ms,loss_pct,loaded_down_ms,loaded_up_ms,down_mbps,up_mbps,bytes,status,message,wan_down_mbps,wan_up_mbps,bg_down_mbps,bg_up_mbps,cpu_down_pct,cpu_up_pct,link_mbps,dev';
 exports.HOSTILE = [ '<img src=x onerror=window.__xss=1>', '<b onmouseover=window.__xss=2>Critical</b>', '<script>window.__xss=3</script>S34' ];
 
 function fields(s) {
@@ -35,7 +42,9 @@ function day(ts) { return new Date(ts * 1000).toISOString().slice(0, 10); }
 
 /* make(now, days, opts) -> {
  *   files: { 'readings/2026-11-19.csv': text, ..., 'channelmap.csv', 'modem.txt', 'events.seen' },
- *   counts: { readings, failed, restarts, events }, times: { outage, restart, dip, gap, lone, failed }
+ *   counts: { readings, failed, restarts, events }, times: { outage, down, restart, dip, gap, lone, failed },
+ *   ispy: { results: text of ISPy's results file, plan_down, plan_up (Mbit/s, as set in ISPy),
+ *           times: { outage, failed, dip, sync, wan, quiet: when the tests made for those moments started } }
  * }
  * opts.interval: minutes between checks (default 5); opts.hostile, opts.good: see above. */
 exports.make = function(now, days, opts) {
@@ -70,6 +79,7 @@ exports.make = function(now, days, opts) {
 		if (ts >= T.outage[0] && ts < T.outage[1]) {
 			add(r, exports.READINGS, [ ts, 'failed', 'unreachable', '', '', '', '', '', '', '', '', '', '', '', '', 100, '', 100, '' ].join(','));
 			counts.failed++;
+			if (!T.down) T.down = ts;   /* the first check that found the internet gone */
 			restartPending = true; lineDownNext = true;
 			continue;
 		}
@@ -140,7 +150,53 @@ exports.make = function(now, days, opts) {
 	});
 	files['events.seen'] = seen.join('\n') + '\n';
 	files['modem.txt'] = [ 'model=' + model, 'firmware=' + firmware, 'mac=00:00:5E:00:53:01', 'docsis=DOCSIS 3.1' ].join('\n') + '\n';
-	return { files: files, counts: counts, times: T, first: stamps[0], last: stamps[stamps.length - 1] };
+
+	/* ISPy on the same router: a test an hour (from a day before Modem
+	 * Health's first check, and not while the router was off), plus tests
+	 * at the moments that matter. Speeds as shares of the advertised
+	 * 1000/40 Mbit/s; "wan" is what ISPy counted on the WAN port. */
+	var PD = 1000, PU = 40, seed2 = 11, tests = [], IT = {};
+	var rnd2 = function() { return (seed2 = (seed2 * 16807) % 2147483647) / 2147483647; };
+	var test = function(ts, down, up, o) {
+		o = o || {};
+		var d = (down * PD).toFixed(2), u = (up * PU).toFixed(2);
+		tests.push([ ts, o.status === 'skipped'
+			? [ ts, 'cloudflare', '', '', '', '', '', '', '', '', 0, 'skipped', 'line busy (61.20 Mbit/s > 50)', '', '', '', '', '', '', '', 'eth0' ]
+			: o.status === 'error'
+			? [ ts, 'cloudflare', '', '', '', '', '', '', '', '', 0, 'error', o.message || 'the test server could not be reached', '', '', '0.02', '0.00', '', '', 2500, 'eth0' ]
+			: [ ts, 'cloudflare', 'SJC', (11 + rnd2() * 4).toFixed(2), (0.4 + rnd2()).toFixed(2), '0.0', (20 + rnd2() * 15).toFixed(2), (25 + rnd2() * 20).toFixed(2),
+				d, u, Math.round(down * PD * 1.6e6), 'ok', '', ((o.wan || down * 1.004) * PD).toFixed(2), (up * 1.004 * PU).toFixed(2), '0.31', '0.05', 41, 23, 2500, 'eth0' ] ]);
+	};
+	for (var h = start - 86400 + 1500; h <= last; h += 3600) {
+		if (h > T.gap[0] - 600 && h < T.gap[1] + 600) continue;
+		var hr = (h % 86400) / 3600;
+		if (hr >= 14 && hr < 15 && !opts.good) test(h, 0.7, 1, {});                        /* slow at a quiet time of day */
+		else if (hr >= 3 && hr < 4 && !opts.good) test(h, 0.97, 0.6, {});                  /* slow upload in the evening */
+		else if (hr >= 20 && hr < 21) test(h, 0, 0, { status: 'skipped' });                /* the line was busy */
+		else test(h, 0.93 + rnd2() * 0.14, 0.95 + rnd2() * 0.1, {});
+	}
+	if (!opts.good) {
+		IT.outage = (T.down || T.outage[0]) - 120;   /* two minutes before the first check that found the internet gone */
+		IT.failed = T.outage[0] + 400;
+		IT.dip = T.dip[0] + 900;
+		test(IT.outage, 0.12, 0.3, {});
+		test(IT.failed, 0, 0, { status: 'error' });
+		test(IT.dip, 0.45, 0.9, {});
+		var sync = entries.filter(function(e) { return /SYNC Timing Synchronization failure/.test(e.msg) && dated(e); })[0];
+		if (sync) { IT.sync = Math.round(local(sync.when) - offset) + 30; test(IT.sync, 0.3, 0.5, {}); }
+	}
+	/* Slow by the test's own figure, not by what crossed the WAN port: ISPy
+	 * credits the higher of the two. */
+	if (start + 7 * 3600 + 700 <= last) {
+		IT.wan = start + 5 * 3600 + 700;
+		test(IT.wan, 0.7, 1, { wan: 0.96 });
+		IT.quiet = start + 7 * 3600 + 700;
+		test(IT.quiet, 0.55, 1, {});
+	}
+	tests.sort(function(a, b) { return a[0] - b[0]; });
+	var ispy = { results: exports.ISPY + '\n' + tests.map(function(t) { return t[1].join(','); }).join('\n') + '\n', plan_down: PD, plan_up: PU, times: IT };
+
+	return { files: files, counts: counts, times: T, first: stamps[0], last: stamps[stamps.length - 1], ispy: ispy };
 };
 
 exports.write = function(dir, made) {

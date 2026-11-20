@@ -130,6 +130,52 @@ exports.start = async function(opts) {
 	}
 };
 
+/* ISPy on the test router: its settings (the advertised speeds) and its
+ * results file, which is the generated one (made.ispy) plus a test whose
+ * server name and message hold markup. ispy(rig, false) takes ISPy away
+ * again. -> what a page should count for a period that holds every test:
+ * { tests, failed, slow } (slow by ISPy's rule, from the file itself). */
+exports.ispy = function(rig, on) {
+	if (on === false)
+		return exports.router('rm -rf /etc/ispy /etc/config/ispy');
+	var sp = rig.made.ispy;
+	var hostile = [ rig.now - 5400, 'cloudflare', gen.HOSTILE[0], 12.1, 0.5, '0.0', 30.2, 41.7, '951.20', '39.10', 1521920000, 'ok',
+		'<script>window.__xss=5</script>', '953.00', '39.20', 0.31, 0.05, 41, 23, 2500, 'eth0' ].join(',');
+	var text = sp.results + hostile + '\n';
+	fs.writeFileSync(path.join(rig.out, 'ispy-results.csv'), text);
+	exports.router([ 'set -e', 'mkdir -p /etc/ispy', 'cp /out/ispy-results.csv /etc/ispy/results.csv', 'touch /etc/config/ispy',
+		'uci set ispy.main=ispy', 'uci set ispy.main.plan_down=' + sp.plan_down, 'uci set ispy.main.plan_up=' + sp.plan_up, 'uci commit ispy' ].join('\n'));
+	var rows = text.split('\n').slice(1).filter(Boolean).map(function(l) { return l.split(','); }).filter(function(f) { return f[11] !== 'skipped'; });
+	return {
+		tests: rows.length,
+		failed: rows.filter(function(f) { return f[11] !== 'ok'; }).length,
+		slow: rows.filter(function(f) { return f[11] === 'ok' && (Math.max(+f[8], +f[13]) < 0.8 * sp.plan_down || Math.max(+f[9], +f[14]) < 0.8 * sp.plan_up); }).length
+	};
+};
+
+/* The Overview's speed tests, read from the page (or the panel's frame):
+ * null when the page says nothing about speed. */
+exports.speedSummary = function() {
+	var box = document.getElementById('mh-speed');
+	if (!box) return null;
+	var svg = box.querySelector('svg.mh-chart'), titles = function(sel, re) {
+		return Array.prototype.filter.call(svg.querySelectorAll(sel + ' title'), function(t) { return re.test(t.textContent); }).length;
+	};
+	var items = Array.prototype.map.call(box.querySelectorAll('li'), function(li) { return li.textContent; });
+	var m = /^(\d+) speed tests by ISPy in this period, of which (\d+) did not complete\./.exec(items[0] || '') || [];
+	var sl = /^Slow \(download or upload below 80% of the advertised speed\): (\d+) tests?, (\d+) of them within (\d+) minutes of a line problem the modem recorded\./.exec(items[1] || '') || [];
+	var fine = /^Not slow: (\d+) tests?, (\d+) of them within \d+ minutes of a line problem\./.exec(items[2] || '') || [];
+	return {
+		text: box.innerText, items: items,
+		/* minutes: the window, which is the time between two checks as set now */
+		tests: +m[1], failed: +m[2], slow: +sl[1], slowInProblem: +sl[2], minutes: +sl[3], fine: +fine[1], fineInProblem: +fine[2],
+		dots: svg.querySelectorAll('circle').length, lines: svg.querySelectorAll('path').length,
+		failedMarks: titles('line', /speed test did not complete/), outageSpans: titles('rect', /^Outage/), eventMarks: titles('line', /SYNC|T3|T4|Modem restarted/),
+		charts: document.querySelectorAll('svg.mh-chart').length,
+		xss: [ window.__xss, box.querySelectorAll('img, script, b').length ]
+	};
+};
+
 /* Every data line of the generated history of one kind (readings, ...). */
 exports.lines = function(made, kind) {
 	return Object.keys(made.files).filter(function(n) { return n.indexOf(kind + '/') === 0; })

@@ -36,8 +36,10 @@ var read = function(f) { return fs.readFileSync(path.join(RES, f), 'utf8'); };
 var health = new Function('baseclass', read('modemhealth/health.js'))(baseclass);
 
 /* A router that has one generated history: data(since, until) answers
- * like the backend. */
-function router(made) {
+ * like the backend. With has.ispy it also has ISPy's results of those days
+ * (has.plan: the advertised speeds set in ISPy, if not the generated ones). */
+function router(made, has) {
+	has = has || {};
 	var text = function(kind, header) {
 		return header + '\n' + Object.keys(made.files).filter(function(n) { return n.indexOf(kind + '/') === 0; }).sort()
 			.map(function(n) { return made.files[n].split('\n').slice(1).filter(Boolean).join('\n'); }).filter(Boolean).join('\n') + '\n';
@@ -51,7 +53,15 @@ function router(made) {
 			var l = t.split('\n').filter(Boolean);
 			return [ l[0] ].concat(l.slice(1).filter(function(r) { var ts = +r.split(',')[0]; return ts >= since && ts <= until; })).join('\n') + '\n';
 		};
-		return Promise.resolve({ readings: cut(all.readings), channels: cut(all.channels), events: cut(all.events), channelmap: made.files['channelmap.csv'] });
+		var reply = { readings: cut(all.readings), channels: cut(all.channels), events: cut(all.events), channelmap: made.files['channelmap.csv'] };
+		if (has.ispy) {
+			/* What the backend passes on of ISPy's file: these columns, without the skipped tests. */
+			var rows = made.ispy.results.split('\n').slice(1).filter(Boolean).map(function(l) { return l.split(','); })
+				.filter(function(f) { return f[11] !== 'skipped'; }).map(function(f) { return [ f[0], f[11], f[8], f[9], f[13], f[14] ].join(','); });
+			var plan = has.plan || { down: made.ispy.plan_down, up: made.ispy.plan_up };
+			reply.speed = { plan_down: String(plan.down), plan_up: String(plan.up), tests: cut('ts,status,down_mbps,up_mbps,wan_down_mbps,wan_up_mbps\n' + rows.join('\n') + '\n') };
+		}
+		return Promise.resolve(reply);
 	}; } };
 	var mh = new Function('baseclass', 'rpc', 'health', read('modemhealth/common.js'))(baseclass, rpc, health);
 	var rb = new Function('baseclass', 'mh', read('modemhealth/report.js'))(baseclass, mh);
@@ -192,6 +202,101 @@ async function main() {
 	var u = router(unread), GU = await u.mh.loadDigest(NOW - 86400, NOW, 5), ur = u.rb.build(GU, {});
 	ok(ur.level === 'unknown' && /None of the \d+ checks in this period could read the modem, so the line could not be judged\./.test(ur.body) &&
 		!/No problems found/.test(ur.body), 'only failed checks: the line is not judged, and not called fine');
+
+	/* ------------------------------------- ISPy's speed tests and the line */
+	/* A fixed moment (18:00 UTC), so that the generated tests fall at the
+	 * same times of day on every run. */
+	var FIX = Date.UTC(2026, 10, 19, 18, 0, 0) / 1000, from5 = FIX - 7 * 86400;
+	var im = gen.make(FIX, 5, {}), ir = router(im, { ispy: true }), IT = im.ispy.times;
+	var GI = await ir.mh.loadDigest(from5, FIX, 5), ST = GI.speedTests, sc = ST.counts;
+	/* The same count made the slow way from ISPy's own file: every test
+	 * against every outage, log entry and check of the period. */
+	var W5 = 300, want = {}, bad = { sync_loss: 1, t3: 1, t4: 1, t2: 1, t6: 1, mdd_loss: 1 };
+	[ 'slow', 'fine', 'failed' ].forEach(function(k) { want[k] = { total: 0, problem: 0, outage: 0, events: 0, out_of_spec: 0, marginal: 0, clear: 0, unknown: 0 }; });
+	var lineAt = {};
+	im.ispy.results.split('\n').slice(1).filter(Boolean).map(function(l) { return l.split(','); }).forEach(function(f) {
+		var ts = +f[0], near = function(x) { return Math.abs(x - ts) <= W5; }, line, group;
+		if (ts < from5 || ts > FIX || f[11] === 'skipped') return;
+		group = f[11] !== 'ok' ? 'failed' : (Math.max(+f[8], +f[13]) < 0.8 * 1000 || Math.max(+f[9], +f[14]) < 0.8 * 40 ? 'slow' : 'fine');
+		var levels = GI.readings.filter(function(x) { return near(+x.ts) && x.result === 'ok'; }).map(function(x) { return x.verdict.level; });
+		if (GI.outages.some(function(x) { return ts >= x.start - W5 && ts <= x.end + W5; })) line = 'outage';
+		else if (GI.events.some(function(e) { return bad[e.kind] && near(e.ts); })) line = 'events';
+		else line = !levels.length ? 'unknown' : levels.indexOf('failing') >= 0 ? 'out_of_spec' : levels.indexOf('degraded') >= 0 ? 'marginal' : 'clear';
+		want[group][line]++; want[group].total++;
+		if (line === 'outage' || line === 'events' || line === 'out_of_spec') want[group].problem++;
+		lineAt[ts] = [ group, line ];
+	});
+	eq([ sc.slow, sc.fine, sc.failed, sc.unjudged.total ], [ want.slow, want.fine, want.failed, 0 ], 'speed: the counts match an independent count from ISPy\'s file (' +
+		[ 'slow', 'fine', 'failed' ].map(function(k) { return k + ' ' + want[k].total + ', ' + want[k].problem + ' during a line problem'; }).join('; ') + ')');
+	ok(sc.slow.outage >= 1 && sc.slow.events >= 1 && sc.slow.out_of_spec >= 2 && sc.slow.marginal >= 2 && sc.slow.unknown >= 1 && sc.fine.marginal > 20 && sc.failed.outage === 1,
+		'speed: the generated tests cover every case (outage, log entries, out of spec, outside the good range, no checks)');
+	var got = function(ts) { var x = ST.tests.filter(function(y) { return y.ts === ts; })[0]; return x ? [ x.group, x.line ] : null; };
+	eq([ got(IT.outage), got(IT.failed), got(IT.dip), got(IT.sync), got(IT.wan), got(IT.quiet) ],
+		[ [ 'slow', 'outage' ], [ 'failed', 'outage' ], [ 'slow', 'out_of_spec' ], [ 'slow', 'events' ], [ 'fine', 'marginal' ], [ 'slow', 'marginal' ] ],
+		'speed: the tests made for the outage, the noise, a loss of sync and a quiet hour are counted where they belong; the WAN port\'s higher figure makes a test not slow');
+	ok(ST.tests.every(function(x) { return x.ts >= from5 && x.ts <= FIX; }) && ST.tests.filter(function(x) { return x.ts < im.first - 3600; }).every(function(x) { return x.line === 'unknown'; }) &&
+		ST.tests.some(function(x) { return x.ts < im.first - 3600; }), 'speed: tests from before Modem Health\'s first check are in the count as not known');
+	var DI = ir.mh.analyse(await ir.mh.load(from5, FIX, 5), 5);
+	eq(DI.speedTests.counts, sc, 'speed: the same counts whether the period is loaded whole or reduced piece by piece');
+
+	var irep = ir.rb.build(GI, opts), ib = irep.body, it = text(ib), ihas = function(re, name) { return ok(re.test(it), name); };
+	ihas(new RegExp(sc.slow.problem + ' of ' + sc.slow.total + ' slow speed tests started within 5 minutes of a line problem the modem recorded \\(for ' + sc.slow.unknown +
+		' it is not known: no check read the modem then\\); so did ' + sc.fine.problem + ' of ' + sc.fine.total + ' tests that were not slow \\(section 5\\)\\.'),
+		'speed: the findings state how many slow tests fell within a line problem, for how many that is not known, and how many of the others did');
+	eq([ irep.level, irep.findings.filter(function(f) { return /speed test/.test(f.text); })[0].level ], [ 'failing', 'info' ], 'speed: that finding is information; it does not change the verdict on the line');
+	ihas(/5\. Speed tests and line problems Speed was measured by ISPy, a separate app on the same router, which ran \d+ speed tests in this period, of which 1 did not complete\. A test is called slow when its download or upload speed was below 80% of the advertised speed set in ISPy \(1000 Mbit\/s download, 40 Mbit\/s upload\)\. Each test is set against what the modem recorded within 5 minutes of the moment the test started\./,
+		'speed: the section says who measured, what slow means and how tests are matched');
+	ihas(new RegExp(sc.slow.total + ' slow tests: ' + sc.slow.problem + ' started within 5 minutes of a line problem, ' + (sc.slow.total - sc.slow.problem - sc.slow.unknown) + ' did not, and for ' + sc.slow.unknown + ' it is not known\\.'),
+		'speed: slow tests during a line problem, at other times, and not known');
+	ihas(/1 test that did not complete: 1 within 5 minutes of a line problem\. A test that did not complete is not counted as slow\./, 'speed: the failed test is stated and not counted as slow');
+	var stRows = /<h2>5\. Speed tests and line problems<\/h2>[\s\S]*?<table[^>]*>([\s\S]*?)<\/table>/.exec(ib)[1].split('<tr').slice(2)
+		.map(function(x) { return x.split('<td>').slice(1).map(function(c) { return c.replace(/<[^>]+>/g, ''); }); });
+	var row = function(label) { return stRows.filter(function(x) { return x[0].indexOf(label) === 0; })[0].slice(1).map(Number); };
+	eq([ row('An outage'), row('A loss of sync'), row('A signal value out of spec'), row('A line problem'), row('A signal value outside'), row('Nothing'), row('Not known'), row('All tests') ],
+		[ 'outage', 'events', 'out_of_spec', 'problem', 'marginal', 'clear', 'unknown', 'total' ].map(function(k) { return [ sc.slow[k], sc.fine[k], sc.failed[k] ]; }),
+		'speed: the table gives every count, by what the modem recorded and by slow, not slow and failed');
+	eq(stRows.length, 8, 'speed: six rows, the line problems together, and the total');
+	var slowRows = /<h3>The slow tests<\/h3><table[^>]*>([\s\S]*?)<\/table>/.exec(ib)[1].split('<tr').slice(2);
+	eq([ slowRows.length, slowRows.filter(function(x) { return /An outage/.test(x); }).length, (slowRows.join('').match(/class="bad"/g) || []).length >= slowRows.length ],
+		[ sc.slow.total, sc.slow.outage, true ], 'speed: every slow test is listed with its speeds and what the modem recorded, the slow direction marked');
+	ok(/<td><span class="bad">120 Mbit\/s \(12%\)<\/span><\/td><td><span class="bad">12(\.\d)? Mbit\/s \(30%\)<\/span><\/td><td>An outage \(no internet\)<\/td>/.test(ib),
+		'speed: the test before the outage: 12% and 30% of the advertised speed, during an outage');
+	/* the uncorrectable codewords of the check after each slow test: thousands in the noise, few at a quiet hour */
+	var lost = function(ts) {
+		var cells = slowRows.filter(function(x) { return x.indexOf('<td>' + ir.mh.fmtTime(ts) + '</td>') >= 0; })[0].split('<td>');
+		return cells[cells.length - 1].replace(/<[^>]+>/g, '').replace(/,/g, '');
+	};
+	var nextCheck = function(ts) { return GI.readings.filter(function(x) { return +x.ts >= ts && +x.ts <= ts + 300 && x.result === 'ok'; })[0]; };
+	eq([ lost(IT.dip), lost(IT.quiet), lost(IT.outage) ], [ String(nextCheck(IT.dip).agg.unc), String(nextCheck(IT.quiet).agg.unc), '–' ],
+		'speed: each slow test with the uncorrectable codewords of the first check after it started; none where that check could not read the modem');
+	ok(+lost(IT.dip) > 10000 && +lost(IT.quiet) < 500 && /Uncorrectable codewords: data the modem lost, as counted by the first check after the test started\..* It is reported, not judged/.test(it),
+		'speed: thousands lost during the noise, few at a quiet hour; the report says they are reported, not judged (' + lost(IT.dip) + ', ' + lost(IT.quiet) + ')');
+	eq([ (ib.match(/<svg /g) || []).length, /Speed tests \(percent of the advertised speed\)/.test(it), /tests? from before the first check of the modem are in the table but not in this chart/.test(it) ],
+		[ 5, true, true ], 'speed: a fifth chart on the same time axis; tests from before the first check are in the table only, and it says so');
+	var speedSvg = ib.slice(ib.lastIndexOf('<svg ')), dots = (speedSvg.match(/<circle /g) || []).length;
+	/* The axis starts a little before the first check (3% of the time since). */
+	var axis = im.first - (FIX - im.first) * 0.03, drawn = ST.tests.filter(function(x) { return x.status === 'ok' && x.ts >= axis; }).length;
+	ok(dots === 2 * drawn && /Outage, /.test(speedSvg) && /speed test did not complete/.test(speedSvg), 'speed: a dot for the download and one for the upload of each test drawn (' + dots + '), with the outage and the failed test marked');
+	ihas(/6\. How this was measured/, 'speed: "How this was measured" becomes section 6');
+	ihas(/It does not measure speed itself\. The speed tests in section 5 were made by ISPy/, 'method: says the router\'s checks do not measure speed and who did');
+	ihas(/credited, as in ISPy, with the higher of what the test measured and the traffic counted on the router's WAN port/, 'method: says how doubt about a speed test is resolved');
+	ihas(/does not prove the cause/, 'speed: the report does not claim a cause');
+	ok(!/undefined|NaN|\[object|%[sdf]|Infinity/.test(it.replace(hostileNote, '')) && !/<script|<img|<b>|<i>/i.test(ib), 'speed: no placeholder, broken number or markup in the text');
+	ok(!/Speed tests|ISPy/.test(t) && /5\. How this was measured/.test(t), 'without ISPy: no section and no mention of speed tests, and the sections keep their numbers');
+
+	/* no advertised speed set in ISPy: tests are shown, none is called slow */
+	var np = router(im, { ispy: true, plan: { down: '', up: '' } }), GN = await np.mh.loadDigest(from5, FIX, 5), nt = text(np.rb.build(GN, opts).body);
+	ok(GN.speedTests.counts.unjudged.total === sc.slow.total + sc.fine.total && /No advertised speed is set in ISPy, so no test is called slow or not slow here\./.test(nt) &&
+		/Speed tests \(Mbit\/s\)/.test(nt) && !/slow speed tests? started/.test(nt) && !/The slow tests/.test(nt), 'no advertised speed in ISPy: the tests are shown in Mbit/s and none is called slow');
+
+	/* a healthy line with ISPy: slow tests, but no line problem to go with them */
+	var hm = gen.make(FIX, 5, { good: true });
+	var hr = router(hm, { ispy: true }), GH = await hr.mh.loadDigest(from5, FIX, 5), hrep = hr.rb.build(GH, { modem: MODEM, generated: FIX }), ht = text(hrep.body);
+	var hc = GH.speedTests.counts, quiet = GH.speedTests.tests.filter(function(x) { return x.ts === hm.ispy.times.quiet; })[0];
+	ok(hrep.level === 'healthy' && hc.slow.total === 1 && hc.slow.problem === 0 && hc.fine.problem === 0 && quiet.group === 'slow' && quiet.line === 'clear',
+		'healthy line: the one slow test is not during a line problem: the checks around it were good');
+	ok(new RegExp('0 of ' + hc.slow.total + ' slow speed tests? started within 5 minutes of a line problem the modem recorded').test(ht) && /No problems found\./.test(ht),
+		'healthy line: the report says none of the slow tests fell within a line problem, and still finds no problem with the line');
 
 	/* -------------------------------------------------------- periods */
 	var w = rb.periodWindow('30', NOW);

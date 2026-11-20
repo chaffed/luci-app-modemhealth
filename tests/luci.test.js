@@ -214,6 +214,37 @@ async function main() {
 		await page.click('button:has-text("Print / save as PDF")');
 		eq(await inFrame(function() { return window.__printed; }), 1, 'report: the print button prints the document, not the page around it');
 
+		/* -------------------------------------------- ISPy's speed tests */
+		await openOverview();
+		eq([ await page.evaluate(rig.speedSummary), /ISPy|[Ss]peed test/.test((await summary()).text) ], [ null, false ],
+			'speed tests: without ISPy the overview says nothing about speed');
+		var want = rig.ispy(r);
+		var week = async function() {
+			await openOverview();
+			await page.selectOption('select.cbi-input-select', '7');
+			await page.waitForFunction(function() { return /Last 7 days/.test(document.querySelector('.mh-summary').textContent); }, null, { timeout: 60000 });
+			await sleep(300);
+		};
+		await week();
+		var sp = await page.evaluate(rig.speedSummary);
+		await page.locator('#mh-speed').screenshot({ path: path.join(SHOTS, 'overview-speed.png') });
+		eq([ sp.tests, sp.failed, sp.slow ], [ want.tests, want.failed, want.slow ],
+			'speed tests: with ISPy\'s results on the router, the overview counts its tests, the failed one and the slow ones (' + sp.items[0] + ')');
+		ok(sp.slowInProblem >= 3 && sp.slowInProblem < sp.slow && sp.minutes === 5 && sp.fine === want.tests - want.failed - want.slow && sp.fineInProblem < sp.fine,
+			'speed tests: and how many of the slow ones and of the others fell within a line problem (' + sp.slowInProblem + ' of ' + sp.slow + '; ' + sp.fineInProblem + ' of ' + sp.fine + ')');
+		ok(sp.charts === 5 && sp.dots > 100 && sp.dots <= 2 * (want.tests - want.failed) && sp.lines === 0 && sp.failedMarks === 1 && sp.outageSpans === 1 && sp.eventMarks >= 5,
+			'speed tests: a fifth chart on the same time axis: a dot for each test (' + sp.dots + '), the failed test, the outage and the events marked');
+		ok(/from before the first check of the modem are counted but not drawn/.test(sp.text), 'speed tests: tests from before the first check are counted, and the page says they are not drawn');
+		eq([ sp.xss[0] == null, sp.xss[1] ], [ true, 0 ], 'speed tests: markup in ISPy\'s file reaches no page');
+		await page.goto(LUCI + '/cgi-bin/luci/admin/services/modemhealth/report');
+		rt = await reportText(/5\. Speed tests and line problems/);
+		await page.screenshot({ path: path.join(SHOTS, 'report-speed.png'), fullPage: true });
+		ok(new RegExp(sp.slowInProblem + ' of ' + sp.slow + ' slow speed tests started within 5 minutes of a line problem the modem recorded( \\(for \\d+ it is not known: no check read the modem then\\))?; so did ' + sp.fineInProblem + ' of ' + sp.fine + ' tests that were not slow').test(rt) &&
+			new RegExp('which ran ' + want.tests + ' speed tests in this period, of which 1 did not complete').test(rt) && /6\. How this was measured/.test(rt),
+			'speed tests: the report has the section, with the same counts as the overview');
+		eq(await inFrame(function() { return [ window.__xss == null, document.querySelectorAll('script, img, b, link').length, document.querySelectorAll('svg.mh-chart').length ]; }),
+			[ true, 0, 5 ], 'speed tests: the report stays one document without script, with a fifth chart');
+
 		/* ------------------------------------------------------ health limits */
 		await openSettings();
 		var good = field('us_power_4_good_max', 'limits'), acc = field('us_power_4_acceptable_max', 'limits');
@@ -339,7 +370,10 @@ async function main() {
 			new RegExp('Checks made\\s+' + stored + ' checks').test(dt) && /Subscriber\s+Zoë O'Brien <b>/.test(dt) && /00:00:5E:00:53:01/.test(dt),
 			'report file on the drive: draws the same findings, counts and details as the Report page');
 		eq(await dpage.evaluate(function() { return [ window.__xss == null, document.querySelectorAll('#mh-report script, #mh-report img, #mh-report b').length, document.querySelectorAll('#mh-report svg.mh-chart').length ]; }),
-			[ true, 0, 4 ], 'report file on the drive: markup in the history stays text; four charts');
+			[ true, 0, 5 ], 'report file on the drive: markup in the history stays text; five charts, the speed tests among them');
+		ok(new RegExp('5\\. Speed tests and line problems\\s+Speed was measured by ISPy, a separate app on the same router, which ran ' + want.tests + ' speed tests in this period, of which 1 did not complete').test(dt) &&
+			new RegExp('\\n' + sp.slow + ' slow tests: ' + sp.slowInProblem + ' started within 5 minutes of a line problem').test(dt),
+			'report file on the drive: carries ISPy\'s tests and draws the same section without the router');
 		await dpage.fill('#mh-notes', 'Written on another computer.');
 		await dpage.press('#mh-notes', 'Tab');
 		await dpage.selectOption('#mh-period', '1');
@@ -349,6 +383,14 @@ async function main() {
 		ok(await dpage.isHidden('#mh-problem').catch(function() { return true; }) && !/Pa ss/.test(onDrive('modemhealth-report.html') + onDrive('modemhealth-readings.csv') + onDrive('modemhealth-events.csv')),
 			'report file on the drive: no modem password in it or in the history files');
 		await off2.close();
+
+		/* ISPy removed again: nothing about speed is left, and nothing breaks. */
+		rig.ispy(r, false);
+		await week();
+		eq([ await page.evaluate(rig.speedSummary), (await summary()).charts ], [ null, 4 ], 'speed tests: with ISPy gone the overview is as before: four charts, no empty section');
+		await page.goto(LUCI + '/cgi-bin/luci/admin/services/modemhealth/report');
+		rt = await reportText(/5\. How this was measured/);
+		ok(!/Speed tests|ISPy/.test(rt), 'speed tests: and so is the report');
 
 		/* ------------------------------------------------------ clear history */
 		await openSettings();
