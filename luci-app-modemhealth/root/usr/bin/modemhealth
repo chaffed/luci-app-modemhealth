@@ -31,7 +31,7 @@ SHARE=${MODEMHEALTH_SHARE:-/usr/share/modemhealth}
 WWW=${MODEMHEALTH_WWW:-/www/luci-static/resources/modemhealth}
 # The report file on a drive carries this many days of history.
 REPORT_DAYS=30
-VERSION=0.1.0   # the package's PKG_VERSION (tests/settings.test.js checks)
+VERSION=1.0.0   # the package's PKG_VERSION (tests/settings.test.js checks)
 HNAP_NS='http://purenetworks.com/HNAP1/'
 STATUS_ACTIONS='GetCustomerStatusStartupSequence GetCustomerStatusConnectionInfo GetCustomerStatusDownstreamChannelInfo GetCustomerStatusUpstreamChannelInfo GetCustomerStatusSoftware GetCustomerStatusLog'
 # Stored per day, in DATA_DIR/readings/ and DATA_DIR/channels/ (see storage).

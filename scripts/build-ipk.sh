@@ -10,7 +10,9 @@ ROOT=$(cd "$(dirname "$0")/.." && pwd)
 PKG=luci-app-modemhealth
 SRC="$ROOT/$PKG"
 VERSION=$(sed -n 's/^PKG_VERSION:=//p' "$SRC/Makefile")
-RELEASE=$(sed -n 's/^PKG_RELEASE:=//p' "$SRC/Makefile")
+# MODEMHEALTH_RELEASE: another release number (tests/install.test.sh makes
+# a newer package of the same files to upgrade to).
+RELEASE=${MODEMHEALTH_RELEASE:-$(sed -n 's/^PKG_RELEASE:=//p' "$SRC/Makefile")}
 OUT=${1:-"$ROOT/dist"}
 
 export COPYFILE_DISABLE=1   # no macOS ._ files in the archives

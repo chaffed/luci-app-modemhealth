@@ -53,7 +53,8 @@ function get(url) {
 	});
 }
 
-/* start({ setup: [ extra shell lines ] }) -> {
+/* start({ setup: [ extra shell lines ], days, gen: options for gen.make
+ * (default: three days, with markup in them) }) -> {
  *   now, made (what gen.make returned), out (folder shared with the router as /out),
  *   browser, page, replies (promises of every reply from the router),
  *   problems (script errors, once watch() was called), watch(), stop()
@@ -76,12 +77,12 @@ exports.start = async function(opts) {
 		docker([ 'build', '-q', '--platform', 'linux/amd64', '-t', IMAGE, path.join(ROOT, 'tests', 'openwrt-luci') ]);
 		rig.modem = cp.spawn('python3', [ path.join(ROOT, 'tests', 'fake_modem.py'), '--port', String(MODEM_PORT), '--password', exports.PASSWORD ], { stdio: 'ignore' });
 		try { docker([ 'rm', '-f', NAME ]); } catch (e) { /* not running */ }
-		docker([ 'run', '-d', '--platform', 'linux/amd64', '--name', NAME, '-p', '127.0.0.1:' + WEB_PORT + ':80',
+		docker([ 'run', '-d', '--platform', 'linux/amd64', '--name', NAME, '--hostname', 'OpenWrt', '-p', '127.0.0.1:' + WEB_PORT + ':80',
 			'--add-host', 'modem:host-gateway', '-v', path.join(ROOT, 'luci-app-modemhealth') + ':/pkg:ro',
 			'-v', path.join(ROOT, 'tests') + ':/tests:ro', '-v', rig.out + ':/out', IMAGE, '/sbin/init' ]);
 
 		rig.now = Math.floor(Date.now() / 1000);
-		rig.made = gen.make(rig.now, 3, { hostile: true });
+		rig.made = gen.make(rig.now, opts.days || 3, opts.gen || { hostile: true });
 		gen.write(path.join(rig.out, 'seed'), rig.made);
 
 		for (var i = 0; i < 100; i++) {
@@ -133,7 +134,8 @@ exports.start = async function(opts) {
 /* ISPy on the test router: its settings (the advertised speeds) and its
  * results file, which is the generated one (made.ispy) plus a test whose
  * server name and message hold markup. ispy(rig, false) takes ISPy away
- * again. -> what a page should count for a period that holds every test:
+ * again; ispy(rig, 'plain') leaves the markup out (for screenshots).
+ * -> what a page should count for a period that holds every test:
  * { tests, failed, slow } (slow by ISPy's rule, from the file itself). */
 exports.ispy = function(rig, on) {
 	if (on === false)
@@ -141,7 +143,7 @@ exports.ispy = function(rig, on) {
 	var sp = rig.made.ispy;
 	var hostile = [ rig.now - 5400, 'cloudflare', gen.HOSTILE[0], 12.1, 0.5, '0.0', 30.2, 41.7, '951.20', '39.10', 1521920000, 'ok',
 		'<script>window.__xss=5</script>', '953.00', '39.20', 0.31, 0.05, 41, 23, 2500, 'eth0' ].join(',');
-	var text = sp.results + hostile + '\n';
+	var text = sp.results + (on === 'plain' ? '' : hostile + '\n');
 	fs.writeFileSync(path.join(rig.out, 'ispy-results.csv'), text);
 	exports.router([ 'set -e', 'mkdir -p /etc/ispy', 'cp /out/ispy-results.csv /etc/ispy/results.csv', 'touch /etc/config/ispy',
 		'uci set ispy.main=ispy', 'uci set ispy.main.plan_down=' + sp.plan_down, 'uci set ispy.main.plan_up=' + sp.plan_up, 'uci commit ispy' ].join('\n'));
