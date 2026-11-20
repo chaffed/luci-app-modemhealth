@@ -171,6 +171,29 @@ function eventsTable(D) {
 	}))));
 }
 
+/* The copy on a USB drive: where it goes and whether the last attempt
+ * worked. ex = { dir, mounted, ts, ok, message } (from the status). */
+function driveBox(ex, redraw) {
+	if (!ex || !ex.dir)
+		return E('p', { 'class': 'mh-note', 'id': 'mh-drive' }, [
+			_('Modem Health can also copy the history and the report to a USB drive after every check.') + ' ',
+			E('a', { 'href': L.url('admin/services/modemhealth/settings') }, [ _('Settings → Storage') ])
+		]);
+	var save = E('button', { 'class': 'cbi-button', 'click': ui.createHandlerFn(null, function() {
+		return mh.callExport().then(function() { return mh.callStatus(); }).then(redraw);
+	}) }, [ _('Save to the drive now') ]);
+	var bad = !ex.mounted
+		? _('No drive is connected at %s, so the copy is not being saved. The history on the router is not affected.').format(ex.dir)
+		: (ex.ok === false ? _('The copy to %s failed: %s. The history on the router is not affected.').format(ex.dir, ex.message || _('unknown error')) : null);
+	if (bad)
+		return E('div', { 'class': 'alert-message warning', 'id': 'mh-drive' }, [ E('p', {}, [ bad ]), save ]);
+	return E('p', { 'id': 'mh-drive' }, [
+		(ex.ts ? _('After every check the history is copied to %s. Last saved: %s.').format(ex.dir, mh.fmtTime(ex.ts))
+			: _('After every check the history is copied to %s. Nothing has been saved yet since the router started.').format(ex.dir)) + ' ',
+		save
+	]);
+}
+
 function listOrNone(items, none) {
 	return items.length ? E('ul', {}, items.map(function(t) { return E('li', {}, [ t ]); })) : E('p', {}, [ none ]);
 }
@@ -287,6 +310,7 @@ return view.extend({
 						return E('button', { 'class': 'cbi-button', 'style': 'margin-left:.3em', 'click': function() { self.download(D, k[0]); } }, [ k[1] ]);
 					}))),
 					self.renderStatus(st, D, draw),
+					driveBox(st['export'], draw),
 					D.changedLimits.length ? E('div', { 'class': 'alert-message notice' }, [
 						_('Judged against limits you changed in Settings: %s. The others are Modem Health\'s sourced defaults.')
 							.format(D.changedLimits.map(function(c) { return c.limit.label; }).join('; '))

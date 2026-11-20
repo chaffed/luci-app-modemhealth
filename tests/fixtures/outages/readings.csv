@@ -1,0 +1,15 @@
+ts,result,reason,model,firmware,uptime_s,connectivity,boot,network_access,modem_time,ds_channels,us_channels,reboot,boot_ts,clock_offset_s,modem_ping_loss,modem_ping_ms,inet_ping_loss,inet_ping_ms
+1795000000,ok,,S34,fw,6000,Operational,Operational,Allowed,11/19/2026 14:13:57,34,5,0,,0,0,1.2,0,15.0
+1795000300,ok,,S34,fw,6000,Operational,Operational,Allowed,11/19/2026 14:13:57,34,5,0,,0,0,1.2,100,
+1795000600,ok,,S34,fw,6000,Operational,Operational,Allowed,11/19/2026 14:13:57,34,5,0,,0,0,1.2,100,
+1795000900,ok,,S34,fw,6000,Operational,Operational,Allowed,11/19/2026 14:13:57,34,5,0,,0,0,1.2,0,15.0
+1795001200,ok,,S34,fw,6000,Operational,Operational,Allowed,11/19/2026 14:13:57,34,5,0,,0,0,1.2,33,15.0
+1795001500,failed,unreachable,,,,,,,,,,,,,100,,100,
+1795001800,ok,,S34,fw,6000,Operational,Operational,Allowed,11/19/2026 14:13:57,34,5,0,,0,0,1.2,100,
+1795002100,ok,,S34,fw,6000,Operational,Operational,Allowed,11/19/2026 14:13:57,34,5,0,,0,0,1.2,0,15.0
+1795002400,failed,no_password,,,,,,,,,,,,,,,,
+1795002700,ok,,S34,fw,6000,Operational,Operational,Allowed,11/19/2026 14:13:57,34,5,0,,0,0,1.2,100,
+1795009900,ok,,S34,fw,6000,Operational,Operational,Allowed,11/19/2026 14:13:57,34,5,0,,0,0,1.2,100,
+1795010200,ok,,S34,fw,6000,Operational,Operational,Allowed,11/19/2026 14:13:57,34,5,0,,0,0,1.2,0,15.0
+1795010500,failed,timeout,,,,,,,,,,,,,0,1.2,100,
+1795010800,ok,,S34,fw,6000,Operational,Operational,Allowed,11/19/2026 14:13:57,34,5,0,,0,0,1.2,100,

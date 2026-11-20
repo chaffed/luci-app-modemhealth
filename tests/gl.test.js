@@ -222,6 +222,34 @@ async function main() {
 		res = await rpc('get_config', {});
 		ok(res.config && res.config.host === 'modem:' + MODEM_PORT && JSON.stringify(res).indexOf('Pa ss') < 0, 'panel: get_config has the settings and not the password');
 
+		/* ------------------------------------------- copy on a drive, and clear */
+		await page.goto(rig.WEB + '/gl-panel.html');
+		await F.locator('.mhgl-nav button[data-page=settings]').click();
+		await F.locator('#mhgl-f-export_dir').waitFor();
+		ok((await F.locator('#mhgl-f-export_dir-list option').evaluateAll(function(o) { return o.map(function(x) { return x.value; }); })).indexOf('/out/modemhealth') >= 0,
+			'drive: the panel suggests a folder on each connected drive');
+		await F.locator('#mhgl-f-export_dir').fill('/');
+		eq(await save(), 'Please correct the highlighted setting.', 'drive: the root folder is refused');
+		await F.locator('#mhgl-f-export_dir').fill('/out/gldrive/modemhealth');
+		ok(/^Saved\./.test(await save()), 'drive: a folder on the drive is saved');
+		await F.locator('.mhgl-nav button[data-page=overview]').click();
+		await F.locator('#mh-drive button').click();
+		await frame().waitForFunction(function() { return /Last saved: \d{4}-/.test((document.getElementById('mh-drive') || {}).textContent || ''); }, null, { timeout: 120000 });
+		var gdir = path.join(out, 'gldrive', 'modemhealth');
+		ok(fs.existsSync(path.join(gdir, 'modemhealth-report.html')) && fs.readFileSync(path.join(gdir, 'modemhealth-readings.csv'), 'utf8').split('\n').length > made.counts.readings,
+			'drive: "Save to the drive now" in the panel writes the history and the report');
+
+		await F.locator('.mhgl-nav button[data-page=settings]').click();
+		await F.locator('button:has-text("Clear history…")').click();
+		ok(/cannot be undone/.test(await F.locator('.mhgl-modal').innerText()), 'clear history: the panel asks first');
+		await F.locator('.mhgl-modal button:has-text("Clear history")').click();
+		await frame().waitForFunction(function() { return /History cleared\./.test((document.querySelector('.mhgl-saved') || {}).textContent || ''); }, null, { timeout: 60000 });
+		ok(+router('cat /etc/modemhealth/readings/*.csv | grep -vc ^ts,; true') === 0 && fs.readdirSync(gdir).filter(function(f) { return /-until-/.test(f); }).length === 6,
+			'clear history: the router\'s history is gone; the copy on the drive is kept under dated names');
+		await F.locator('.mhgl-nav button[data-page=overview]').click();
+		await F.locator('.mh-summary').waitFor({ timeout: 60000 });
+		ok(/No checks yet\./.test(await F.locator('#mhgl-view').innerText()), 'clear history: the overview is empty and still works');
+
 		/* ------------------------------------------------------------ secrecy */
 		var seen = (await Promise.all(r.replies)).join('\n');
 		ok(r.replies.length > 15 && seen.indexOf('Pa ss') < 0, 'secrecy: the modem password is in none of the %d replies the browser received'.replace('%d', r.replies.length));

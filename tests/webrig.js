@@ -65,9 +65,12 @@ exports.start = async function(opts) {
 	rig.stop = async function() {
 		if (rig.browser) await rig.browser.close();
 		if (rig.modem) rig.modem.kill();
+		/* What the router wrote to the shared folder is root's there (on
+		 * Linux): let it remove that itself. */
+		try { exports.router('rm -rf /out/* 2>/dev/null; true'); } catch (e) { /* not running */ }
 		if (process.env.MH_KEEP) console.log('container left running: ' + exports.WEB + ' (LuCI: root / ' + exports.ROOT_PW + '); remove with: docker rm -f ' + NAME);
 		else { try { docker([ 'rm', '-f', NAME ]); } catch (e) { /* gone */ } }
-		fs.rmSync(rig.out, { recursive: true, force: true });
+		try { fs.rmSync(rig.out, { recursive: true, force: true }); } catch (e) { console.log('left behind: ' + rig.out + ' (' + e.code + ')'); }
 	};
 	try {
 		docker([ 'build', '-q', '--platform', 'linux/amd64', '-t', IMAGE, path.join(ROOT, 'tests', 'openwrt-luci') ]);

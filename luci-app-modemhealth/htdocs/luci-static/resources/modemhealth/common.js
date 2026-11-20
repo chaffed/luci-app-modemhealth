@@ -19,6 +19,8 @@ var callData = rpc.declare({ object: 'luci.modemhealth', method: 'data', params:
 var callCheck = rpc.declare({ object: 'luci.modemhealth', method: 'check' });
 var callTest = rpc.declare({ object: 'luci.modemhealth', method: 'test', params: [ 'host', 'username', 'password' ] });
 var callSetPassword = rpc.declare({ object: 'luci.modemhealth', method: 'set_password', params: [ 'password' ] });
+var callExport = rpc.declare({ object: 'luci.modemhealth', method: 'export' });
+var callClear = rpc.declare({ object: 'luci.modemhealth', method: 'clear' });
 
 var SVGNS = 'http://www.w3.org/2000/svg';
 
@@ -489,6 +491,7 @@ function legend(items) {
 return baseclass.extend({
 	C: C, health: health,
 	callStatus: callStatus, callData: callData, callCheck: callCheck, callTest: callTest, callSetPassword: callSetPassword,
+	callExport: callExport, callClear: callClear,
 	parseCSV: parseCSV, load: load, loadDigest: loadDigest, analyse: analyse, toCSV: toCSV, csvField: csvField, esc: esc,
 	fmtTime: fmtTime, isoTime: isoTime, fmtShort: fmtShort, fmtDuration: fmtDuration, fmtNum: fmtNum, fmtInt: fmtInt, fmtLimit: fmtLimit,
 	LEVEL_TEXT: LEVEL_TEXT, reasonText: reasonText, groupReasons: groupReasons, groupedText: groupedText,
