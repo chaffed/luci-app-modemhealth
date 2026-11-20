@@ -21,10 +21,13 @@ jobs:
             luci-app-modemhealth/root/usr/libexec/rpcd/luci.modemhealth \
             luci-app-modemhealth/root/etc/init.d/modemhealth \
             luci-app-modemhealth/root/etc/uci-defaults/* \
-            scripts/*.sh
+            scripts/*.sh tests/*.sh
 
       - name: Check Python syntax
         run: python3 -m py_compile tests/*.py tools/*.py
+
+      - name: Test the capture tool (what it removes before saving)
+        run: python3 tests/capture.test.py
 
       - name: Check JavaScript syntax
         run: |
@@ -77,18 +80,8 @@ jobs:
       - name: Build ipk
         run: scripts/build-ipk.sh dist
 
-      - name: Install the ipk on a clean OpenWrt 23.05
-        run: |
-          docker run --rm -v "$PWD/dist:/dist:ro" openwrt/rootfs:x86-64-23.05.6 sh -c '
-            set -e
-            mkdir -p /var/lock
-            opkg update >/dev/null
-            opkg install /dist/*.ipk
-            ls -l /etc/config/modemhealth | grep -q "^-rw------- "
-            modemhealth check || true
-            grep -q ",failed,no_password," /etc/modemhealth/readings/*.csv
-            test -x /etc/init.d/modemhealth
-            ls /etc/rc.d/ | grep -q modemhealth'
+      - name: Install, upgrade and remove the ipk on a clean OpenWrt 23.05
+        run: sh tests/install.test.sh
 
       - uses: actions/upload-artifact@v4
         with:

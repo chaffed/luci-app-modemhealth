@@ -2,6 +2,8 @@ dist/
 .DS_Store
 .scratch/
 capture-raw/
+modem-capture/
+modem-capture.zip
 __pycache__/
 .test-out/
 node_modules/

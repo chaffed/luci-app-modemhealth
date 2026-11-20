@@ -32,6 +32,10 @@ PASSWORD = "Pa ss,w\"o'r$d\\`1"
 failures = []
 
 
+# The package's version, which the backend must state as its own.
+with open(os.path.join(ROOT, "luci-app-modemhealth", "Makefile")) as _f:
+    VERSION = re.search(r"^PKG_VERSION:=(\S+)", _f.read(), re.M).group(1)
+
 ISPY_HEADER = ("ts,backend,server,ping_ms,jitter_ms,loss_pct,loaded_down_ms,loaded_up_ms,down_mbps,up_mbps,bytes,status,message,"
                "wan_down_mbps,wan_up_mbps,bg_down_mbps,bg_up_mbps,cpu_down_pct,cpu_up_pct,link_mbps,dev")
 ISPY_CONFIG = "printf '%s\\n' \"config ispy 'main'\" \"\toption plan_down '1000'\" \"\toption plan_up '40'\" {} > /etc/config/ispy; "
@@ -520,7 +524,7 @@ def main():
         check(lineup[1:4] == ["200,ds,1,20,Unknown,501000000,", "100,us,1,1,SC-QAM,16400000,6400000", "300,ds,1,20,256QAM,501000000,"]
               and lineup[0].startswith("ts,dir,") and lineup[4:] == [""],
               "web data: the line-up as it was at the start of the period, then each change in it, nothing later (%s)" % lineup[1:])
-        check(st.get("version") == "0.1.0", "web status: the version")
+        check(st.get("version") == VERSION, "web status: the version (%s)" % VERSION)
 
         # ------------------------------------------------ ISPy's speed tests
         check("speed" not in data and "speed" not in future, "speed tests: without ISPy the data says nothing about speed")
@@ -626,7 +630,7 @@ def main():
               and "MH_MODULES.report = function" in report and report.count("\n1") > 80 and "Zoe Example" in report,
               "copy: the report file carries the history, the report details and the report's code (%d KB)" % (len(report) // 1024))
         ctx = json.loads(report.split('<script type="application/json" id="mh-ctx">')[1].split("</script>")[0])
-        check(ctx["modem"].get("mac") == "00:00:5E:00:53:01" and ctx["version"] == "0.1.0" and ctx["interval"] == 5 and ctx["sub"]["subscriber"] == "Zoe Example"
+        check(ctx["modem"].get("mac") == "00:00:5E:00:53:01" and ctx["version"] == VERSION and ctx["interval"] == 5 and ctx["sub"]["subscriber"] == "Zoe Example"
               and ctx["limits"] == {}, "copy: its settings are valid JSON with the modem's identity (%s)" % sorted(ctx))
         text = files_text(drive)
         check("mh-speedtests" not in report.split("<script>")[0] and ctx["speed"] == {"plan_down": "", "plan_up": ""},

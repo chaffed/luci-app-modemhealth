@@ -2,16 +2,21 @@
  * Builds the sample report in docs/ (sample-report.pdf) from a
  * generated two-week history of a line with faults, on a router that also
  * runs ISPy: the report exactly as the Report page makes it, printed by
- * Chrome.
+ * Chrome. Also the two pictures of it the README shows (report.png: its
+ * first page; report-speed.png: the speed tests against the line).
  *
  *   npm install --no-save playwright-core
  *   node tests/sample-report.js [OUTDIR]     (default: docs)
  */
+/* One time zone wherever this runs (the generator's evening is the US west
+ * coast's), so that the sample only changes when the report does. */
+process.env.TZ = 'America/Los_Angeles';
 var fs = require('fs'), path = require('path');
 var gen = require('./gen.js');
 var ROOT = path.join(__dirname, '..');
 var RES = path.join(ROOT, 'luci-app-modemhealth/htdocs/luci-static/resources');
 var out = path.resolve(process.argv[2] || path.join(ROOT, 'docs'));
+var VERSION = /^PKG_VERSION:=(\S+)/m.exec(fs.readFileSync(path.join(ROOT, 'luci-app-modemhealth/Makefile'), 'utf8'))[1];
 
 String.prototype.format = function() {
 	var a = arguments, i = 0;
@@ -56,7 +61,7 @@ mh.loadDigest(NOW - 14 * 86400, NOW, 5).then(async function(G) {
 		modem: { model: 'S34', firmware: 'AT01.01.010.042324_S3.04.735', mac: '00:00:5E:00:53:01', docsis: 'DOCSIS 3.1' },
 		sub: { isp: 'Example Cable', subscriber: 'Alex Example', account: '0000 00 000 0000000', address: '100 Example Street, Springfield' },
 		notes: 'The connection has dropped several times a day since early November. I reported it by phone on 12 November (ticket 000000) and was told the line tested fine.\n\nThis is a sample report made from generated data.',
-		interval: 5, ping_host: '1.1.1.1', generated: NOW, version: '0.1.0'
+		interval: 5, ping_host: '1.1.1.1', generated: NOW, version: VERSION
 	}).page();
 	fs.mkdirSync(out, { recursive: true });
 	var playwright = require(process.env.PLAYWRIGHT_CORE || 'playwright-core');
@@ -64,9 +69,13 @@ mh.loadDigest(NOW - 14 * 86400, NOW, 5).then(async function(G) {
 	var page = await (await browser.newContext({ viewport: { width: 1000, height: 1200 } })).newPage();
 	await page.setContent(html);
 	await page.pdf({ path: path.join(out, 'sample-report.pdf'), format: 'Letter', printBackground: true });
-	/* MH_EXTRA=1 also leaves the HTML and a picture of it, to look at. */
+	await page.screenshot({ path: path.join(out, 'report.png'), clip: { x: 0, y: 0, width: 1000, height: 1160 } });
+	var speed = await page.locator('h2', { hasText: 'Speed tests and line problems' }).boundingBox();
+	var slow = await page.locator('h3', { hasText: 'The slow tests' }).boundingBox();
+	await page.screenshot({ path: path.join(out, 'report-speed.png'), fullPage: true, clip: { x: 0, y: speed.y - 12, width: 1000, height: slow.y - speed.y } });
+	/* MH_EXTRA=1 also leaves the HTML and a picture of all of it, to look at. */
 	if (process.env.MH_EXTRA) {
-		await page.screenshot({ path: path.join(out, 'report.png'), fullPage: true });
+		await page.screenshot({ path: path.join(out, 'report-full.png'), fullPage: true });
 		fs.writeFileSync(path.join(out, 'sample-report.html'), html);
 	}
 	await browser.close();
