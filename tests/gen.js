@@ -6,10 +6,11 @@
  * an SNR dip, an outage followed by a modem restart, a failed check, two
  * hours with the router off, and the capture's own event log at the end.
  *
- *   node tests/gen.js OUTDIR [DAYS] [--hostile]
+ *   node tests/gen.js OUTDIR [DAYS] [--hostile] [--good]
  *
  * --hostile adds events and a model name containing markup, to prove no
- * page renders it.
+ * page renders it. --good gives a line with nothing wrong: every value
+ * within the good range, no events, no failed checks.
  */
 var fs = require('fs'), path = require('path');
 var FIX = path.join(__dirname, 'fixtures', 's34');
@@ -36,7 +37,7 @@ function day(ts) { return new Date(ts * 1000).toISOString().slice(0, 10); }
  *   files: { 'readings/2026-11-19.csv': text, ..., 'channelmap.csv', 'modem.txt', 'events.seen' },
  *   counts: { readings, failed, restarts, events }, times: { outage, restart, dip, gap, lone, failed }
  * }
- * opts.interval: minutes between checks (default 5); opts.hostile: see above. */
+ * opts.interval: minutes between checks (default 5); opts.hostile, opts.good: see above. */
 exports.make = function(now, days, opts) {
 	opts = opts || {};
 	var step = (opts.interval || 5) * 60, seed = 7;
@@ -54,6 +55,8 @@ exports.make = function(now, days, opts) {
 		outage: [ now - 20 * 3600, now - 20 * 3600 + 3 * step + 60 ],
 		failed: now - 8 * 3600                            /* one check the modem did not answer in time */
 	};
+	if (opts.good)
+		T = { gap: [ 0, 0 ], lone: 0, dip: [ 0, 0 ], outage: [ 0, 0 ], failed: 0 };
 	var files = {}, counts = { readings: 0, failed: 0, restarts: 0, events: 0 }, stamps = [];
 	var add = function(name, header, line) { files[name] = (files[name] || header + '\n') + line + '\n'; };
 	var boot = start - 9 * 86400 - 4000, restartPending = false, lineDownNext = false;
@@ -77,24 +80,25 @@ exports.make = function(now, days, opts) {
 		}
 		var reboot = 0, bootTs = '';
 		if (restartPending) { boot = ts - 95; reboot = 1; bootTs = boot; restartPending = false; counts.restarts++; T.restart = boot; }
-		var inet = lineDownNext ? 100 : (rnd() < 0.01 ? 33 : 0);
+		var inet = lineDownNext ? 100 : (rnd() < 0.01 && !opts.good ? 33 : 0);
 		lineDownNext = false;
 		add(r, exports.READINGS, [ ts, 'ok', '', model, firmware, ts - boot, 'Operational', 'Operational', 'Allowed', modemTime(ts + 2), ds.length, us.length,
 			reboot, bootTs, 2, 0, (1.5 + rnd() * 0.6).toFixed(3), inet, inet === 100 ? '' : (13 + rnd() * 5).toFixed(3) ].join(','));
 		var hour = (ts % 86400) / 3600, wave = Math.sin(2 * Math.PI * (ts % 86400) / 86400);
 		var dip = ts >= T.dip[0] && ts <= T.dip[1];
-		var evening = hour >= 2 && hour < 5;   /* the evening on the US west coast, in UTC */
+		var evening = hour >= 2 && hour < 5 && !opts.good;   /* the evening on the US west coast, in UTC */
 		ds.forEach(function(f) {
 			var ofdm = /OFDM/.test(f[2]);
 			var power = +f[5] + 1.2 * wave + (rnd() - 0.5) * 0.4;
 			var snr = +f[6] + (rnd() - 0.5) * 0.8 - (dip && !ofdm ? 8.5 + rnd() * 3 : 0);
 			var corrected = Math.round((dip ? 4000 : 20) * rnd() * (ofdm ? 30 : 1));
-			var unc = dip ? Math.round(300 + rnd() * 2500) : (rnd() < 0.03 ? Math.round(rnd() * 40) : 0);
+			var unc = dip ? Math.round(300 + rnd() * 2500) : (rnd() < 0.03 && !opts.good ? Math.round(rnd() * 40) : 0);
 			add(c, exports.CHANNELS, [ ts, 'ds', f[3], f[1], power.toFixed(1), snr.toFixed(1), corrected, unc ].join(','));
 		});
 		us.forEach(function(f) {
 			var ofdma = /OFDMA/.test(f[2]);
-			var power = +f[6] + 0.3 * wave + (rnd() - 0.5) * 0.3 + (evening && !ofdma ? 0.9 : 0);
+			/* The captured line transmits at 50.5 dBmV; a good one has headroom. */
+			var power = +f[6] + 0.3 * wave + (rnd() - 0.5) * 0.3 + (evening && !ofdma ? 0.9 : 0) - (opts.good && !ofdma ? 6 : 0);
 			add(c, exports.CHANNELS, [ ts, 'us', f[3], f[1], power.toFixed(1), '', '', '' ].join(','));
 		});
 	}
@@ -117,6 +121,8 @@ exports.make = function(now, days, opts) {
 		return new Date(+m[3], m[1] - 1, +m[2], +m[4], +m[5], +m[6]).getTime() / 1000;
 	};
 	var offset = Math.round(local(entries[entries.length - 1].when) - (now - 600)), seen = [];
+	if (opts.good)
+		entries = [];
 	if (opts.hostile) {
 		entries.push({ when: modemTime(now - 420 + offset), level: 'Notice', msg: exports.HOSTILE[0] + ' markup in a message' });
 		entries.push({ when: modemTime(now - 400 + offset), level: exports.HOSTILE[1], msg: 'markup in a level' });
@@ -146,8 +152,9 @@ exports.write = function(dir, made) {
 
 if (require.main === module) {
 	var args = process.argv.slice(2).filter(function(a) { return a.slice(0, 2) !== '--'; });
-	if (!args[0]) { console.error('usage: node tests/gen.js OUTDIR [DAYS] [--hostile]'); process.exit(2); }
-	var made = exports.make(Math.floor(Date.now() / 1000), +args[1] || 3, { hostile: process.argv.indexOf('--hostile') > 0 });
+	if (!args[0]) { console.error('usage: node tests/gen.js OUTDIR [DAYS] [--hostile] [--good]'); process.exit(2); }
+	var made = exports.make(Math.floor(Date.now() / 1000), +args[1] || 3,
+		{ hostile: process.argv.indexOf('--hostile') > 0, good: process.argv.indexOf('--good') > 0 });
 	exports.write(args[0], made);
 	console.log('%d checks (%d failed), %d events in %s', made.counts.readings, made.counts.failed, made.counts.events, args[0]);
 }

@@ -139,6 +139,81 @@ async function main() {
 			'csv: channel rows carry the line-up');
 		ok(csv.events.rows.some(function(r) { return r.indexOf(gen.HOSTILE[0]) >= 0; }), 'csv: text is exported as stored');
 
+		/* ------------------------------------------------------------- Report */
+		await page.goto(LUCI + '/cgi-bin/luci/admin/services/modemhealth/report');
+		await page.waitForSelector('#mh-report-frame');
+		ok(/Add your name and account number in Settings/.test(await page.innerText('#view')), 'report: asks for the account details while they are missing');
+		await openSettings();
+		await tab('report');
+		await page.fill(field('subscriber'), 'Zoë O\'Brien <b>');
+		await page.fill(field('account'), '8155 60 012 3456789');
+		await apply();
+		eq(router('uci get modemhealth.main.subscriber; uci get modemhealth.main.account').trim().split('\n'), [ 'Zoë O\'Brien <b>', '8155 60 012 3456789' ],
+			'settings: the report details are stored as typed');
+
+		var SHOWN = /Cable line health report/;
+		var RF = page.frameLocator('#mh-report-frame');
+		var reportText = async function(re) {
+			for (var k = 0; k < 300; k++) {
+				var tx = await RF.locator('body').innerText().catch(function() { return ''; });
+				if (SHOWN.test(tx) && (!re || re.test(tx)) && !(await page.locator('#mh-report-status .spinning').count())) return tx;
+				await sleep(200);
+			}
+			throw new Error('the report did not show ' + re);
+		};
+		await page.goto(LUCI + '/cgi-bin/luci/admin/services/modemhealth/report');
+		var rt = await reportText();
+		await page.screenshot({ path: path.join(SHOTS, 'report.png'), fullPage: true });
+		ok(!/Add your name and account number/.test(await page.innerText('#view')), 'report: no longer asks for the account details');
+		ok(/The line had faults in this period\./.test(rt) && /1 outage with no internet connection/.test(rt) && /13 losses of downstream sync/.test(rt),
+			'report: the findings of the last 7 days');
+		ok(new RegExp('Checks made\\s+' + made.counts.readings + ' checks, one every 5 minutes').test(rt) && /could not read the modem\s+4 \(/.test(rt),
+			'report: every stored check counted, the failed ones stated');
+		ok(/Preliminary\./.test(rt), 'report: just under three days of history is called preliminary');
+		ok(/Subscriber\s+Zoë O'Brien <b>/.test(rt) && /Account number\s+8155 60 012 3456789/.test(rt) && /00:00:5E:00:53:01/.test(rt) && rt.indexOf(gen.HOSTILE[2]) >= 0,
+			'report: account details and the modem\'s identity, markup shown as text');
+		var inFrame = function(fn, arg) { return page.frames().filter(function(f) { return f.parentFrame() === page.mainFrame(); })[0].evaluate(fn, arg); };
+		eq(await inFrame(function() { return [ window.__xss == null, document.querySelectorAll('script, img, b, link').length, document.querySelectorAll('svg.mh-chart').length ]; }),
+			[ true, 0, 4 ], 'report: no script, image or outside file in it; four charts');
+
+		await page.fill('#mh-report-notes', 'First reported on 3 March, ticket 12345.');
+		await page.press('#mh-report-notes', 'Tab');
+		rt = await reportText(/Subscriber's statement/);
+		ok(/First reported on 3 March, ticket 12345\./.test(rt), 'report: the subscriber\'s statement is printed in it');
+		ok(/Every event, with its time/.test(rt), 'report: lists every event with its time');
+		await page.uncheck('#mh-report-times');
+		for (i = 0; i < 100 && /Every event, with its time/.test(await reportText()); i++) await sleep(200);
+		ok(!/Every event, with its time/.test(await reportText()), 'report: that list can be left out');
+		await page.check('#mh-report-times');
+		await reportText(/Every event, with its time/);
+		await page.selectOption('select[aria-label="Period"]', '1');
+		rt = await reportText(/Checks made\s+28\d checks/);
+		ok(/Checks made\s+28\d checks/.test(rt), 'report: the period can be changed (last 24 hours)');
+
+		/* the file: the same document, and it stands alone */
+		var srcdoc = await page.getAttribute('#mh-report-frame', 'srcdoc');
+		var rdl = (await Promise.all([ page.waitForEvent('download'), page.click('button:has-text("Download report (HTML)")') ]))[0];
+		var rfile = path.join(SHOTS, 'report.html');
+		await rdl.saveAs(rfile);
+		ok(/^cable-line-health-report-\d{4}-\d\d-\d\d\.html$/.test(rdl.suggestedFilename()) && fs.readFileSync(rfile, 'utf8') === srcdoc,
+			'report file: the download is the document on the page, byte for byte (' + Math.round(srcdoc.length / 1024) + ' KB)');
+		var offline = await r.browser.newContext({ offline: true, viewport: { width: 1000, height: 1200 } });
+		var opage = await offline.newPage(), requests = [], oproblems = [];
+		opage.on('request', function(q) { requests.push(q.url()); });
+		opage.on('pageerror', function(e) { oproblems.push(e.message); });
+		opage.on('console', function(m) { if (m.type() === 'error') oproblems.push(m.text()); });
+		await opage.goto('file://' + rfile);
+		var otext = await opage.innerText('body');
+		eq([ requests.length, oproblems.length, otext === rt, await opage.locator('svg.mh-chart').count() ], [ 1, 0, true, 4 ],
+			'report file: opens without the router or the internet, asks for nothing else, and reads the same as the page');
+		var pdf = await opage.pdf({ path: path.join(SHOTS, 'report.pdf'), format: 'Letter', printBackground: true });
+		var pages = (pdf.toString('latin1').match(/\/Type\s*\/Page[^s]/g) || []).length;
+		ok(pages >= 3 && pages <= 12, 'report file: prints to PDF (%d pages)'.replace('%d', pages));
+		await offline.close();
+		await inFrame(function() { window.print = function() { window.__printed = (window.__printed || 0) + 1; }; });
+		await page.click('button:has-text("Print / save as PDF")');
+		eq(await inFrame(function() { return window.__printed; }), 1, 'report: the print button prints the document, not the page around it');
+
 		/* ------------------------------------------------------ health limits */
 		await openSettings();
 		var good = field('us_power_4_good_max', 'limits'), acc = field('us_power_4_acceptable_max', 'limits');

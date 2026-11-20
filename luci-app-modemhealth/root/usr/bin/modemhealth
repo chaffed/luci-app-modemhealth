@@ -26,6 +26,7 @@
 # shellcheck shell=dash
 
 CONFIG=modemhealth
+VERSION=0.1.0   # the package's PKG_VERSION (tests/settings.test.js checks)
 HNAP_NS='http://purenetworks.com/HNAP1/'
 STATUS_ACTIONS='GetCustomerStatusStartupSequence GetCustomerStatusConnectionInfo GetCustomerStatusDownstreamChannelInfo GetCustomerStatusUpstreamChannelInfo GetCustomerStatusSoftware GetCustomerStatusLog'
 # Stored per day, in DATA_DIR/readings/ and DATA_DIR/channels/ (see storage).
@@ -609,9 +610,16 @@ do_data() {
 			rows_between "$k" "$since" "$until"
 		} | json_text
 	done
-	# The whole line-up history is small; the page picks what applies.
+	# The line-up as it was at SINCE (the last entry of each channel before
+	# it) and every change up to UNTIL. On a line whose channels keep
+	# losing lock the whole history would outgrow a reply.
 	printf ',"channelmap":'
-	cat "$DATA_DIR/channelmap.csv" 2>/dev/null | json_text
+	awk -F, -v s="$since" -v u="$until" '
+		NR == 1 { print; next }
+		$1 + 0 < s { k = $2 "," $4; if (!(k in last)) order[++n] = k; last[k] = $0; next }
+		$1 + 0 <= u { later[++m] = $0 }
+		END { for (i = 1; i <= n; i++) print last[order[i]]; for (i = 1; i <= m; i++) print later[i] }
+	' "$DATA_DIR/channelmap.csv" 2>/dev/null | json_text
 	echo '}'
 }
 
@@ -622,7 +630,8 @@ do_status() {
 	[ "$ENABLED" = 1 ] && [ -n "$pid" ] && sched=true
 	next=$(cat "$RUN_DIR/next" 2>/dev/null)
 	last=$(all_readings | tail -n 1)
-	printf '{"enabled":%s,"scheduler":%s,"synced":%s,"next_check":%s,"interval":%s,"now":%s,' \
+	printf '{"version":"%s",' "$VERSION"
+	printf '"enabled":%s,"scheduler":%s,"synced":%s,"next_check":%s,"interval":%s,"now":%s,' \
 		"$(json_bool [ "$ENABLED" = 1 ])" "$sched" "$(json_bool time_synced)" "$(json_num "$next")" "$INTERVAL" "$(date +%s)"
 	printf '"password_set":%s,"host":%s,"username":%s,"readings_header":%s,"last":%s,"modem":{' \
 		"$(json_bool [ -n "$PASSWORD" ])" "$(json_str "$HOST")" "$(json_str "$USERNAME")" "$(json_str "$READINGS_HEADER")" "$(json_str "$last")"

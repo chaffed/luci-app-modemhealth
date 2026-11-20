@@ -55,51 +55,158 @@ function eventTime(e) {
 	return ts > seen + 60 ? seen : ts;
 }
 
-/* Everything stored between since and until (epoch seconds), joined up:
- * channels carry their modulation, frequency and width from the line-up,
- * events their kind.
- *
- * A ubus reply fails somewhere between 1 and 2 MB, and a check stores
- * about 1.4 KB, so the period is asked for in pieces of 250 checks
- * (about 350 KB, 21 hours at 5-minute checks), which LuCI sends as one request. */
-function load(since, until, intervalMin) {
-	var step = Math.max(3600, (intervalMin || 5) * 60 * 250), calls = [];
+/* The line-up (position, modulation, frequency, width) of a channel at a
+ * time: the latest entry stored at or before it. A channel's entry changes
+ * (one that lost lock reports no modulation), so a row is joined to the
+ * line-up of its own moment, not to the newest. */
+function lineUp(text) {
+	var by = {};
+	parseCSV(text).forEach(function(m) {
+		var k = m.dir + ',' + m.channel_id;
+		(by[k] = by[k] || []).push(m);
+	});
+	Object.keys(by).forEach(function(k) { by[k].sort(function(a, b) { return a.ts - b.ts; }); });
+	return function(dir, id, ts) {
+		var list = by[dir + ',' + id], m = null;
+		if (!list) return {};
+		for (var i = 0; i < list.length && +list[i].ts <= +ts; i++) m = list[i];
+		return m || list[0];
+	};
+}
+
+/* What the backend's data command returns, joined up: channels carry
+ * their position, modulation, frequency and width from the line-up, events
+ * their kind and their time on the router's clock. */
+function assemble(d) {
+	var at = lineUp(d.channelmap);
+	var channels = parseCSV(d.channels).map(function(c) {
+		var m = at(c.dir, c.channel_id, c.ts);
+		c.ch = m.ch; c.modulation = m.modulation; c.freq_hz = m.freq_hz; c.width_hz = m.width_hz;
+		return c;
+	});
+	var byTs = {};
+	channels.forEach(function(c) { (byTs[c.ts] = byTs[c.ts] || []).push(c); });
+	var events = parseCSV(d.events).map(function(e) {
+		e.kind = health.classifyEvent(e.message);
+		e.ts = eventTime(e);
+		return e;
+	});
+	return { readings: parseCSV(d.readings), channels: channels, channelsAt: byTs, events: events };
+}
+
+/* A ubus reply fails somewhere between 1 and 2 MB, and a check stores
+ * about 1.4 KB, so a period is asked for in pieces of 250 checks (about
+ * 350 KB, 21 hours at 5-minute checks). */
+function pieces(since, until, intervalMin) {
+	var step = Math.max(3600, (intervalMin || 5) * 60 * 250), out = [];
 	for (var a = since; a <= until; a += step)
-		calls.push(callData(a, Math.min(a + step - 1, until)));
-	return Promise.all(calls).then(function(parts) {
+		out.push([ a, Math.min(a + step - 1, until) ]);
+	return out;
+}
+
+function inPeriod(since, until) {
+	return function(e) { return e.ts >= since && e.ts <= until; };
+}
+
+/* Everything stored between since and until (epoch seconds), joined up and
+ * kept whole: for the Overview's tables, charts and CSV files (days, not
+ * months; see loadDigest). LuCI sends the pieces as one request. */
+function load(since, until, intervalMin) {
+	return Promise.all(pieces(since, until, intervalMin).map(function(p) { return callData(p[0], p[1]); })).then(function(parts) {
 		var join = function(k) {
 			return parts.map(function(p, i) {
 				var t = String((p || {})[k] || '');
 				return i ? t.slice(t.indexOf('\n') + 1) : t;
 			}).join('');
 		};
-		return { readings: join('readings'), channels: join('channels'), events: join('events'), channelmap: (parts[0] || {}).channelmap };
-	}).then(function(d) {
-		var map = {};
-		parseCSV(d.channelmap).forEach(function(m) { map[m.dir + ',' + m.channel_id] = m; });
-		var channels = parseCSV(d.channels).map(function(c) {
-			var m = map[c.dir + ',' + c.channel_id] || {};
-			c.ch = m.ch; c.modulation = m.modulation; c.freq_hz = m.freq_hz; c.width_hz = m.width_hz;
-			return c;
-		});
-		var byTs = {};
-		channels.forEach(function(c) { (byTs[c.ts] = byTs[c.ts] || []).push(c); });
-		var events = parseCSV(d.events).map(function(e) {
-			e.kind = health.classifyEvent(e.message);
-			e.ts = eventTime(e);
-			return e;
-		}).filter(function(e) { return e.ts >= since && e.ts <= until; })
-		  .sort(function(a, b) { return a.ts - b.ts; });
-		var readings = parseCSV(d.readings).sort(function(a, b) { return a.ts - b.ts; });
-		return { since: since, until: until, readings: readings, channels: channels, channelsAt: byTs, events: events };
+		var D = assemble({ readings: join('readings'), channels: join('channels'), events: join('events'), channelmap: join('channelmap') });
+		D.since = since; D.until = until;
+		D.events = D.events.filter(inPeriod(since, until)).sort(function(a, b) { return a.ts - b.ts; });
+		D.readings.sort(function(a, b) { return a.ts - b.ts; });
+		return D;
 	});
+}
+
+/* One piece of a period reduced to what a report needs: every reading
+ * keeps its verdict and a few figures for the charts, every channel a
+ * tally, and the channel rows themselves are let go. */
+function reduce(G, P) {
+	P.readings.forEach(function(r) {
+		var rows = P.channelsAt[r.ts] || [], v = health.readingVerdict(r, rows, G.limits);
+		var a = { dsPowerMin: null, dsPowerMax: null, snrMin: null, merMin: null, us: {}, unc: null, corr: null, unlocked: 0 };
+		var low = function(k, x) { if (x != null && (a[k] == null || x < a[k])) a[k] = x; };
+		v.channels.forEach(function(cv) {
+			var c = cv.channel, ofdm = /OFDM/.test(c.modulation || ''), p = health.num(c.power_dbmv), q = health.num(c.snr_db);
+			var unc = health.num(c.uncorrectable), corr = health.num(c.corrected);
+			var locked = !c.lock || /^locked$/i.test(c.lock);
+			if (!locked) a.unlocked++;
+			if (c.dir === 'ds') {
+				if (!ofdm) {
+					low('dsPowerMin', p);
+					if (p != null && (a.dsPowerMax == null || p > a.dsPowerMax)) a.dsPowerMax = p;
+					low('snrMin', q);
+				}
+				else low('merMin', q);
+				if (unc != null) a.unc = (a.unc || 0) + unc;
+				if (corr != null) a.corr = (a.corr || 0) + corr;
+			}
+			else if (p != null) a.us[c.channel_id] = p;
+
+			var k = c.dir + ',' + c.channel_id, t = G.channels[k];
+			if (!t) t = G.channels[k] = { dir: c.dir, channel_id: c.channel_id, n: 0, marginal: 0, bad: 0, unlocked: 0,
+				powerMin: null, powerMax: null, snrMin: null, snrMax: null, unc: 0, corr: 0 };
+			/* How it was last described while it had a modulation. */
+			if (c.modulation && c.modulation !== 'Unknown' || !t.modulation) { t.modulation = c.modulation; t.ch = c.ch; t.freq_hz = c.freq_hz; t.width_hz = c.width_hz; }
+			t.n++;
+			if (cv.level === health.MARGINAL) t.marginal++;
+			if (cv.level === health.BAD) t.bad++;
+			if (!locked) t.unlocked++;
+			if (p != null) { if (t.powerMin == null || p < t.powerMin) t.powerMin = p; if (t.powerMax == null || p > t.powerMax) t.powerMax = p; }
+			if (q != null) { if (t.snrMin == null || q < t.snrMin) t.snrMin = q; if (t.snrMax == null || q > t.snrMax) t.snrMax = q; }
+			if (unc != null) t.unc += unc;
+			if (corr != null) t.corr += corr;
+		});
+		if (r.result === 'ok' && (!G.latest || +r.ts > +G.latest.reading.ts))
+			G.latest = { reading: r, verdict: v };
+		r.agg = a;
+		r.verdict = { level: v.level, reasons: v.reasons };
+		G.readings.push(r);
+	});
+	P.events.forEach(function(e) { G.events.push(e); });
+}
+
+/* A period reduced piece by piece (see reduce), so that months of channel
+ * rows are never held at once. progress(done, of) is called as it goes.
+ * -> what analyse() returns, with .channels a tally per channel and
+ *    .latest the newest good reading with its channels. */
+function loadDigest(since, until, intervalMin, limits, progress) {
+	var G = { since: since, until: until, interval: intervalMin || 5, limits: limits || health.LIMITS,
+		readings: [], events: [], channels: {}, latest: null, judged: true };
+	var todo = pieces(since, until, intervalMin), i = 0;
+	var next = function() {
+		if (i >= todo.length) {
+			G.readings.sort(function(a, b) { return a.ts - b.ts; });
+			G.events = G.events.filter(inPeriod(since, until)).sort(function(a, b) { return a.ts - b.ts; });
+			return analyse(G, G.interval, G.limits);
+		}
+		var batch = todo.slice(i, i + 4);
+		return Promise.all(batch.map(function(p) { return callData(p[0], p[1]); })).then(function(parts) {
+			parts.forEach(function(p) { reduce(G, assemble(p || {})); });
+			i += batch.length;
+			if (progress) progress(Math.min(i, todo.length), todo.length);
+			return next();
+		});
+	};
+	return next();
 }
 
 /* Verdicts for every reading, and for the whole period. limits: from
  * health.applySettings (default: health.LIMITS). */
 function analyse(D, intervalMin, limits) {
 	D.limits = limits = limits || health.LIMITS;
-	D.readings.forEach(function(r) { r.verdict = health.readingVerdict(r, D.channelsAt[r.ts] || [], limits); });
+	/* A digest's readings are judged already (see reduce). */
+	if (!D.judged)
+		D.readings.forEach(function(r) { r.verdict = health.readingVerdict(r, D.channelsAt[r.ts] || [], limits); });
 	var outages = health.outages(D.readings, Math.max(1800, (intervalMin || 5) * 60 * 3));
 	var disruptive = D.events.filter(function(e) { return e.kind !== 'login'; });
 	var hours = Math.max((D.until - D.since) / 3600, 1 / 60);
@@ -138,9 +245,11 @@ function fmtDuration(s) {
 	if (s == null) return _('unknown');
 	s = Math.round(s);
 	if (s < 60) return _('%d s').format(s);
-	if (s < 3600) return _('%d min').format(Math.round(s / 60));
-	if (s < 86400) return _('%d h %d min').format(Math.floor(s / 3600), Math.round(s % 3600 / 60));
-	return _('%d d %d h').format(Math.floor(s / 86400), Math.round(s % 86400 / 3600));
+	/* Rounded first, then split: never "1 h 60 min" or "13 d 24 h". */
+	var m = Math.round(s / 60), h = Math.round(s / 3600);
+	if (m < 60) return _('%d min').format(m);
+	if (h < 24) return _('%d h %d min').format(Math.floor(m / 60), m % 60);
+	return _('%d d %d h').format(Math.floor(h / 24), h % 24);
 }
 
 function fmtNum(v, digits) {
@@ -255,11 +364,22 @@ function toCSV(D, kind) {
 
 /* --------------------------------------------------------------- charts -- */
 
+function esc(v) {
+	return String(v == null ? '' : v).replace(/[&<>"']/g, function(c) {
+		return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
+	});
+}
+
+/* SVG as text, so that the same chart serves the pages and the report
+ * file. Attribute values are escaped here; children are markup made the
+ * same way, and text goes through esc(). */
 function S(tag, attrs, children) {
-	var el = document.createElementNS(SVGNS, tag);
-	Object.keys(attrs || {}).forEach(function(k) { if (attrs[k] != null) el.setAttribute(k, attrs[k]); });
-	(children || []).forEach(function(c) { el.appendChild(typeof c === 'string' ? document.createTextNode(c) : c); });
-	return el;
+	var a = Object.keys(attrs || {}).map(function(k) {
+		var v = attrs[k];
+		if (v == null) return '';
+		return ' ' + k + '="' + esc(typeof v === 'number' ? +v.toFixed(2) : v) + '"';
+	}).join('');
+	return '<' + tag + a + '>' + (children || []).join('') + '</' + tag + '>';
 }
 
 function niceTicks(lo, hi, n) {
@@ -270,7 +390,7 @@ function niceTicks(lo, hi, n) {
 	return out;
 }
 
-/* lineChart({
+/* chartSVG({
  *   from, to: time range (epoch s); unit, title (for the description)
  *   series: [ { name, color, points: [ [ts, v|null], ... ], bars: bool } ]
  *   bands:  [ { lo, hi, color } ]  shaded value ranges (limits)
@@ -278,8 +398,8 @@ function niceTicks(lo, hi, n) {
  *   marks:  [ { ts, color, label } ] events, drawn as ticks at the top
  *   gap:    seconds without a point after which a line breaks
  *   interval: seconds between checks (the width of a bar)
- * }) -> <svg> */
-function lineChart(o) {
+ * }) -> the chart as SVG text */
+function chartSVG(o) {
 	var W = 720, H = 220, ml = 48, mr = 10, mt = 14, mb = 26;
 	var vals = [];
 	o.series.forEach(function(s) { s.points.forEach(function(p) { if (p[1] != null) vals.push(p[1]); }); });
@@ -290,29 +410,29 @@ function lineChart(o) {
 	lo -= o.zero && lo === 0 ? 0 : pad; hi += pad;
 	var x = function(ts) { return ml + (ts - o.from) / Math.max(o.to - o.from, 1) * (W - ml - mr); };
 	var y = function(v) { return mt + (hi - v) / (hi - lo) * (H - mt - mb); };
-	var svg = S('svg', { viewBox: '0 0 ' + W + ' ' + H, width: '100%', role: 'img', 'class': 'mh-chart' });
+	var parts = [];
 
 	(o.bands || []).forEach(function(b) {
 		var top = y(Math.min(b.hi == null ? hi : b.hi, hi)), bottom = y(Math.max(b.lo == null ? lo : b.lo, lo));
-		if (bottom > top) svg.appendChild(S('rect', { x: ml, y: top, width: W - ml - mr, height: bottom - top, fill: b.color, 'fill-opacity': 0.10 }));
+		if (bottom > top) parts.push(S('rect', { x: ml, y: top, width: W - ml - mr, height: bottom - top, fill: b.color, 'fill-opacity': 0.10 }));
 	});
 	(o.spans || []).forEach(function(sp) {
 		var a = x(Math.max(sp.from, o.from)), b = x(Math.min(sp.to, o.to));
-		svg.appendChild(S('rect', { x: a, y: mt, width: Math.max(b - a, 2), height: H - mt - mb, fill: sp.color, 'fill-opacity': 0.25 },
-			[ S('title', {}, [ sp.label ]) ]));
+		parts.push(S('rect', { x: a, y: mt, width: Math.max(b - a, 2), height: H - mt - mb, fill: sp.color, 'fill-opacity': 0.25 },
+			[ S('title', {}, [ esc(sp.label) ]) ]));
 	});
 	niceTicks(lo, hi, 5).forEach(function(v) {
-		svg.appendChild(S('line', { x1: ml, x2: W - mr, y1: y(v), y2: y(v), stroke: 'currentColor', 'stroke-opacity': 0.12 }));
-		svg.appendChild(S('text', { x: ml - 6, y: y(v) + 4, 'text-anchor': 'end', 'font-size': 11, fill: 'currentColor' }, [ String(v) ]));
+		parts.push(S('line', { x1: ml, x2: W - mr, y1: y(v), y2: y(v), stroke: 'currentColor', 'stroke-opacity': 0.12 }));
+		parts.push(S('text', { x: ml - 6, y: y(v) + 4, 'text-anchor': 'end', 'font-size': 11, fill: 'currentColor' }, [ esc(v) ]));
 	});
 	var span = o.to - o.from, step = span > 3 * 86400 ? 86400 : span > 86400 ? 6 * 3600 : span > 8 * 3600 ? 3 * 3600 : span > 3 * 3600 ? 3600 : 1800;
 	var t0 = new Date(o.from * 1000);
 	t0.setMinutes(0, 0, 0);
 	if (step === 86400) t0.setHours(0);
 	for (var t = t0.getTime() / 1000 + step; t < o.to; t += step) {
-		svg.appendChild(S('line', { x1: x(t), x2: x(t), y1: mt, y2: H - mb, stroke: 'currentColor', 'stroke-opacity': 0.08 }));
-		svg.appendChild(S('text', { x: x(t), y: H - 8, 'text-anchor': 'middle', 'font-size': 11, fill: 'currentColor' },
-			[ step === 86400 ? fmtShort(t).split(' ')[0] : fmtShort(t).split(' ')[1] ]));
+		parts.push(S('line', { x1: x(t), x2: x(t), y1: mt, y2: H - mb, stroke: 'currentColor', 'stroke-opacity': 0.08 }));
+		parts.push(S('text', { x: x(t), y: H - 8, 'text-anchor': 'middle', 'font-size': 11, fill: 'currentColor' },
+			[ esc(step === 86400 ? fmtShort(t).split(' ')[0] : fmtShort(t).split(' ')[1]) ]));
 	}
 	o.series.forEach(function(s) {
 		if (s.bars) {
@@ -323,8 +443,8 @@ function lineChart(o) {
 			var bw = Math.min(Math.max(per * 0.8, 1.5), 14);
 			s.points.forEach(function(p) {
 				if (p[1] == null || p[1] <= 0) return;
-				svg.appendChild(S('rect', { x: x(p[0]) - bw / 2, y: y(p[1]), width: bw, height: y(Math.max(lo, 0)) - y(p[1]), fill: s.color },
-					[ S('title', {}, [ '%s · %s: %s'.format(fmtTime(p[0]), s.name, fmtInt(p[1])) ]) ]));
+				parts.push(S('rect', { x: x(p[0]) - bw / 2, y: y(p[1]), width: bw, height: y(Math.max(lo, 0)) - y(p[1]), fill: s.color },
+					[ S('title', {}, [ esc('%s · %s: %s'.format(fmtTime(p[0]), s.name, fmtInt(p[1]))) ]) ]));
 			});
 			return;
 		}
@@ -337,18 +457,24 @@ function lineChart(o) {
 			prev = p[0];
 			/* A reading with no neighbour to join is drawn as a dot. */
 			if (!joined(pts[i - 1], p) && !joined(p, pts[i + 1]))
-				svg.appendChild(S('circle', { cx: x(p[0]), cy: y(p[1]), r: 3, fill: s.color },
-					[ S('title', {}, [ '%s · %s: %s'.format(fmtTime(p[0]), s.name, String(p[1])) ]) ]));
+				parts.push(S('circle', { cx: x(p[0]), cy: y(p[1]), r: 3, fill: s.color },
+					[ S('title', {}, [ esc('%s · %s: %s'.format(fmtTime(p[0]), s.name, String(p[1]))) ]) ]));
 		});
-		if (d) svg.appendChild(S('path', { d: d, fill: 'none', stroke: s.color, 'stroke-width': 1.6, 'stroke-dasharray': s.dash || null },
-			[ S('title', {}, [ s.name ]) ]));
+		if (d) parts.push(S('path', { d: d, fill: 'none', stroke: s.color, 'stroke-width': 1.6, 'stroke-dasharray': s.dash || null },
+			[ S('title', {}, [ esc(s.name) ]) ]));
 	});
 	(o.marks || []).forEach(function(m) {
-		svg.appendChild(S('line', { x1: x(m.ts), x2: x(m.ts), y1: mt - 2, y2: mt + 10, stroke: m.color, 'stroke-width': 2 },
-			[ S('title', {}, [ m.label ]) ]));
+		parts.push(S('line', { x1: x(m.ts), x2: x(m.ts), y1: mt - 2, y2: mt + 10, stroke: m.color, 'stroke-width': 2 },
+			[ S('title', {}, [ esc(m.label) ]) ]));
 	});
-	svg.setAttribute('aria-label', o.title || '');
-	return svg;
+	return S('svg', { xmlns: SVGNS, viewBox: '0 0 ' + W + ' ' + H, width: '100%', role: 'img', 'class': 'mh-chart', 'aria-label': o.title || '' }, parts);
+}
+
+/* The same chart as an element, for the pages. */
+function lineChart(o) {
+	var box = document.createElement('div');
+	box.innerHTML = chartSVG(o);
+	return box.firstChild;
 }
 
 function legend(items) {
@@ -363,8 +489,8 @@ function legend(items) {
 return baseclass.extend({
 	C: C, health: health,
 	callStatus: callStatus, callData: callData, callCheck: callCheck, callTest: callTest, callSetPassword: callSetPassword,
-	parseCSV: parseCSV, load: load, analyse: analyse, toCSV: toCSV, csvField: csvField,
-	fmtTime: fmtTime, fmtShort: fmtShort, fmtDuration: fmtDuration, fmtNum: fmtNum, fmtInt: fmtInt, fmtLimit: fmtLimit,
+	parseCSV: parseCSV, load: load, loadDigest: loadDigest, analyse: analyse, toCSV: toCSV, csvField: csvField, esc: esc,
+	fmtTime: fmtTime, isoTime: isoTime, fmtShort: fmtShort, fmtDuration: fmtDuration, fmtNum: fmtNum, fmtInt: fmtInt, fmtLimit: fmtLimit,
 	LEVEL_TEXT: LEVEL_TEXT, reasonText: reasonText, groupReasons: groupReasons, groupedText: groupedText,
-	lineChart: lineChart, legend: legend
+	chartSVG: chartSVG, lineChart: lineChart, legend: legend
 });

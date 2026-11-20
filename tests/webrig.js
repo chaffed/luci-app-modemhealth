@@ -109,7 +109,11 @@ exports.start = async function(opts) {
 		rig.page = await ctx.newPage();
 		rig.page.on('response', function(res) {
 			if (!/\/(cgi-bin|ubus)/.test(res.url())) return;
-			rig.replies.push(res.text().then(function(t) { return res.url() + '\n' + t; }, function() { return ''; }));
+			/* A reply cut off by leaving the page may never finish: do not wait for it. */
+			rig.replies.push(Promise.race([
+				res.text().then(function(t) { return res.url() + '\n' + t; }, function() { return ''; }),
+				exports.sleep(20000).then(function() { return ''; })
+			]));
 		});
 		/* Script errors count from here on (LuCI's login page answers 403). */
 		rig.watch = function() {

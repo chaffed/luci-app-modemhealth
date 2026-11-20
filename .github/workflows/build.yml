@@ -38,6 +38,9 @@ jobs:
       - name: Test the page logic
         run: node tests/ui.test.js
 
+      - name: Test the report for the ISP
+        run: node tests/report.test.js
+
       - name: Check that every setting is in both forms and the panel's module
         run: node tests/settings.test.js
 

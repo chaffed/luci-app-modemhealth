@@ -217,6 +217,12 @@ def main():
             ("web_data", config(host, PASSWORD, "/out/web_data/data"),
              "modemhealth check >/dev/null; modemhealth check >/dev/null",
              "modemhealth data $(( $(date +%s) + 3600 )) > /out/web_data/future.json", "modemhealth data 0"),
+            # The line-up for a period: as it was at its start, and every change in it.
+            ("web_lineup", config(host, PASSWORD, "/out/web_lineup/data"),
+             "mkdir -p /out/web_lineup/data; printf '%s\\n' ts,dir,ch,channel_id,modulation,freq_hz,width_hz "
+             "100,ds,1,20,256QAM,501000000, 100,us,1,1,SC-QAM,16400000,6400000 200,ds,1,20,Unknown,501000000, "
+             "300,ds,1,20,256QAM,501000000, 400,us,1,1,SC-QAM,16400000,3200000 > /out/web_lineup/data/channelmap.csv",
+             ":", "modemhealth data 250 350"),
             # Test connection with what is typed (password in the environment),
             # storing nothing and leaving the kept session alone.
             ("web_test", config(host, "", "/out/web_test/data"), ":",
@@ -420,6 +426,12 @@ def main():
         check(len(lines("events")) == 1 + 87 and len(lines("channelmap")) == 1 + 39, "web data: events and the channel line-up")
         future = json.loads(open(os.path.join(d, "future.json")).read())
         check(len([l for l in future["readings"].split("\n") if l]) == 1, "web data: nothing outside the period asked for")
+
+        lineup = json.loads(open(os.path.join(out, "web_lineup", "output.txt")).read())["channelmap"].split("\n")
+        check(lineup[1:4] == ["200,ds,1,20,Unknown,501000000,", "100,us,1,1,SC-QAM,16400000,6400000", "300,ds,1,20,256QAM,501000000,"]
+              and lineup[0].startswith("ts,dir,") and lineup[4:] == [""],
+              "web data: the line-up as it was at the start of the period, then each change in it, nothing later (%s)" % lineup[1:])
+        check(st.get("version") == "0.1.0", "web status: the version")
 
         d = os.path.join(out, "web_test")
         res = json.loads(open(os.path.join(d, "output.txt")).read())
