@@ -74,7 +74,7 @@ var events = [ 'first_seen_ts,modem_time,clock_offset_s,level,message' ].concat(
 	.map(function(e) { return [ T + 6 * S, e.time, OFFSET, e.level, e.message.replace(/;CM-MAC=.*$/, '').replace(/,/g, '') ].join(','); }));
 served.data = { readings: readings.join('\n') + '\n', channels: channels.join('\n') + '\n', events: events.join('\n') + '\n', channelmap: map.join('\n') + '\n' };
 
-mh.load(T - 6 * 3600, T + 7 * S, 1).then(function(D) {
+mh.load(T - 6 * 3600, T + 7 * S, 1).then(async function(D) {
 	eq(D.readings.length, 7, 'load: all readings');
 	eq([ dataCalls, D.channels.length ], [ 2, 7 * 39 - 39 ], 'load: asked for in pieces (250 checks at 1 minute = 4 h 10 min) and put back together without loss');
 	var c = D.channelsAt[String(T)].filter(function(x) { return x.dir === 'ds' && x.channel_id === '194'; })[0];
@@ -114,6 +114,17 @@ mh.load(T - 6 * 3600, T + 7 * S, 1).then(function(D) {
 	eq(grouped.map(function(g) { return mh.groupedText(g); }),
 		[ 'Upstream power (SC-QAM, 4 channels) marginal on 4 channels: 50 to 50.8 dBmV.' ],
 		'texts: the four marginal upstream channels are one line with the range of values');
+
+	/* The line-up holds an entry for a channel only when it changed: a row
+	 * is joined to the entry of its own time. */
+	var whole = served.data;
+	served.data = Object.assign({}, whole, { channelmap: whole.channelmap + [ T + 2 * S, 'ds', '34', '194', 'OFDM PLC', '963000000', '' ].join(',') + '\n' });
+	var Dm = await mh.load(T - 6 * 3600, T + 7 * S, 5);
+	var f194 = function(ts) { return Dm.channelsAt[String(ts)].filter(function(x) { return x.dir === 'ds' && x.channel_id === '194'; })[0].freq_hz; };
+	eq([ f194(T), f194(T + S), f194(T + 2 * S), f194(T + 6 * S), Dm.channelsAt[String(T + 6 * S)].filter(function(x) { return x.modulation; }).length ],
+		[ '957000000', '957000000', '963000000', '963000000', 39 ],
+		'load: a channel that moved has its old frequency before the change and the new one from it on; the others keep their one entry');
+	served.data = whole;
 
 	/* CSV export */
 	var csv = function(kind) { return mh.toCSV(D, kind).split('\r\n').filter(Boolean); };

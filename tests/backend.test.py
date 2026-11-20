@@ -190,6 +190,21 @@ def main():
             ("deltas", config(host, PASSWORD, "/out/deltas/data"),
              "modemhealth check >/dev/null; " + CTL % "counter_add=100&uptime=6700"),
             # The modem restarted: uptime 60 s, counters start again at 7.
+            # The line-up: a channel that loses lock and finds it again changes
+            # nothing in it; a channel that moves adds one entry.
+            ("lineup", config(host, PASSWORD, "/out/lineup/data"),
+             "modemhealth check >/dev/null; " + CTL % "unlock=25,194" + "; modemhealth check >/dev/null; "
+             + CTL % "unlock=" + "; modemhealth check >/dev/null; " + CTL % "retune=13:465000000"),
+            # Once a day the line-up file is tidied: entries that say nothing
+            # new go, and those from before the kept history, bar the newest
+            # of each channel.
+            ("lineup_tidy", config(host, PASSWORD, "/out/lineup_tidy/data"),
+             "mkdir -p /out/lineup_tidy/data; n=$(date +%s); printf '%s\\n' ts,dir,ch,channel_id,modulation,freq_hz,width_hz "
+             "1000,ds,1,20,256QAM,501000000, 1000,us,1,1,SC-QAM,16400000,6400000 2000,ds,1,20,Unknown,501000000, "
+             "3000,ds,1,20,256QAM,501000000, 3000,us,1,1,SC-QAM,16400000,6400000 "
+             "$((n-100)),ds,1,20,256QAM,501000000, $((n-50)),ds,2,99,256QAM,459000000, $((n-40)),ds,2,99,256QAM,459000000, "
+             "> /out/lineup_tidy/data/channelmap.csv",
+             "cat /var/run/modemhealth/lineup_tidied > /out/lineup_tidy/stamp; date +%Y-%m-%d >> /out/lineup_tidy/stamp"),
             ("restart", config(host, PASSWORD, "/out/restart/data"),
              "modemhealth check >/dev/null; " + CTL % "restart=1&counter_add=7"),
             # A failed check in between: changes count from the last good one.
@@ -468,6 +483,28 @@ def main():
         check(len(readings) == 1 and readings[0]["result"] == "ok", "daemon: checks at once on start")
         check(state["logouts"] == 1, "daemon: logs out of the modem when stopped")
         check(open(os.path.join(d, "left_running")).read().strip() == "", "daemon: stops when told to")
+
+        d = os.path.join(out, "lineup")
+        cmap, readings, ch = read_csv(os.path.join(d, "data", "channelmap.csv")), stored(d, "readings"), stored(d, "channels")
+        t = [r["ts"] for r in readings]
+        check(len(readings) == 4 and [c["ts"] for c in cmap].count(t[0]) == 39, "line-up: stored whole at the first check")
+        check([(c["ts"], c["dir"], c["channel_id"], c["freq_hz"]) for c in cmap[39:]] == [(t[3], "ds", "13", "465000000")],
+              "line-up: two channels losing lock and finding it again add nothing; a channel that moved adds one entry (%s)" % cmap[39:])
+        check(not any(c["modulation"] == "Unknown" for c in cmap), "line-up: a channel that lost lock keeps its modulation")
+        lost = [(c["channel_id"], c["lock"]) for c in ch if c["ts"] == t[1] and c["lock"] != "Locked"]
+        check(sorted(lost) == [("194", "Not Locked"), ("25", "Not Locked")] and all(c["lock"] == "Locked" for c in ch if c["ts"] == t[2]),
+              "line-up: the loss of lock itself is in the channel rows of that check")
+        last = open(os.path.join(d, "data", "channelmap.last")).read().split("\n")
+        check(len([l for l in last if l]) == 39 and "ds,2,13,256QAM,465000000," in last and "ds,34,194,OFDM PLC,957000000," in last,
+              "line-up: the line-up of the latest check is kept for the next comparison")
+
+        d = os.path.join(out, "lineup_tidy")
+        cmap, readings = read_csv(os.path.join(d, "data", "channelmap.csv")), stored(d, "readings")
+        before = [(c["ts"], c["dir"], c["channel_id"], c["modulation"]) for c in cmap if c["ts"] != readings[0]["ts"]]
+        check(before[:2] == [("3000", "ds", "20", "256QAM"), ("1000", "us", "1", "SC-QAM")] and len(before) == 3 and before[2][1:3] == ("ds", "99"),
+              "line-up tidy: of the entries before the kept history only the newest of each channel stays; repeats go (%s)" % before)
+        stamp = open(os.path.join(d, "stamp")).read().split()
+        check(len(stamp) == 2 and stamp[0] == stamp[1], "line-up tidy: done once a day")
 
         # ---------------------------------------------------------- sessions
         def scenario(name):

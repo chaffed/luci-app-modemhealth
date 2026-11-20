@@ -18,6 +18,10 @@ Control endpoints (plain GET on the same port) for tests:
                                 uptime=N        report N seconds of uptime
                                 new_events=N    N new log entries (loss of sync), the
                                                 oldest dropped so the log keeps 100
+                                unlock=ID,ID    these downstream channels lost lock
+                                                ("Not Locked", modulation "Unknown");
+                                                empty: all locked again
+                                retune=ID:HZ    downstream channel ID is now at HZ
                                 restart=1       the modem restarted: counters start
                                                 again from counter_add, uptime from
                                                 the uptime setting (default 60)
@@ -83,6 +87,8 @@ class Modem:
         self.counter_base = True   # False after a restart: counters start from 0
         self.uptime = None
         self.new_events = 0
+        self.unlocked = set()
+        self.retuned = {}
         self.counts = {"requests": 0, "logins": 0, "login_failures": 0,
                        "bad_signatures": 0, "status_reads": 0, "logouts": 0,
                        "unauthorised": 0, "stale_timestamps": 0}
@@ -98,6 +104,10 @@ class Modem:
                     base = (lambda v: int(v)) if self.counter_base else (lambda v: 0)
                     f[7] = str(base(f[7]) + self.counter_add)
                     f[8] = str(base(f[8]) + self.counter_add)
+                if len(f) > 4 and f[3].strip() in self.unlocked:
+                    f[1], f[2] = "Not Locked", "Unknown"
+                if len(f) > 4 and f[3].strip() in self.retuned:
+                    f[4] = self.retuned[f[3].strip()]
                 rows.append("^".join(f))
             reply["CustomerConnDownstreamChannel"] = "|+|".join(rows)
         if action == "GetCustomerStatusLog" and self.new_events:
@@ -162,6 +172,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         m.counter_add = int(value)
                     elif key == "uptime":
                         m.uptime = int(value)
+                    elif key == "unlock":
+                        m.unlocked = set(v for v in value.split(",") if v)
+                    elif key == "retune":
+                        ch, hz = value.split(":")
+                        m.retuned[ch] = hz
                     elif key == "new_events":
                         m.new_events += int(value)
                     elif key == "restart":
