@@ -35,7 +35,7 @@ function limitsSection(m) {
 	s.tab('signal', _('Signal levels'));
 	s.tab('events', _('Events'));
 	H.limitList().forEach(function(it) {
-		var fields = H.limitFields(it.key, it.limit);
+		var fields = H.limitFields(it.key, it.limit), rechecking = false;
 		var unit = it.limit.unit === 'share' ? '%' : it.limit.unit;
 		var defText = fields.map(function(f) { return '%s %s'.format(BOUND_TEXT[f.option.slice(it.key.length + 1)], f.value); }).join(', ');
 		var sources = it.limit.sources.map(function(k) { return H.SOURCES[k].kind === 'judgement' ? _('Modem Health\'s judgement') : H.SOURCES[k].title; });
@@ -46,14 +46,25 @@ function limitsSection(m) {
 			o.placeholder = String(f.value);
 			o.datatype = 'float';
 			o.rmempty = true;
-			/* The good range must lie within the acceptable range. */
+			/* The good range must lie within the acceptable range. A change
+			 * to one bound re-checks the limit's other bounds. */
 			o.validate = function(section_id, value) {
 				var b = { good: it.limit.good.slice(), marginal: it.limit.marginal.slice() };
+				var sibling = L.bind(function(g) { return this.section.children.filter(function(c) { return c.option === g.option; })[0]; }, this);
 				fields.forEach(function(g) {
-					var opt = this.section.children.filter(function(c) { return c.option === g.option; })[0];
-					var v = H.num(opt ? opt.formvalue(section_id) : null);
+					var opt = sibling(g), v = H.num(g.option === f.option ? value : (opt ? opt.formvalue(section_id) : null));
 					if (v != null) b[g.band][g.end] = v;
-				}, this);
+				});
+				if (!rechecking) {
+					rechecking = true;
+					window.setTimeout(function() {
+						fields.forEach(function(g) {
+							var el = g.option !== f.option && sibling(g) ? sibling(g).getUIElement(section_id) : null;
+							if (el) el.triggerValidation();
+						});
+						rechecking = false;
+					}, 0);
+				}
 				var lo = function(x) { return x == null ? -Infinity : x; }, hi = function(x) { return x == null ? Infinity : x; };
 				if (lo(b.good[0]) > hi(b.good[1])) return _('The good range is empty: "from" is above "up to".');
 				if (lo(b.good[0]) < lo(b.marginal[0]) || hi(b.good[1]) > hi(b.marginal[1])) return _('The good range must lie within the acceptable range.');

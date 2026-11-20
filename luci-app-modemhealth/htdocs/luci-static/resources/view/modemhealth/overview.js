@@ -29,6 +29,7 @@ var CSS = [
 	'.mh-tablewrap{overflow-x:auto}',
 	'.mh-note{opacity:.75;font-size:90%}',
 	'.mh-events td{vertical-align:top}',
+	'.mh-events td:first-child{white-space:nowrap}',
 	'.mh-ev-Critical td:first-child{border-left:4px solid #d9534f}',
 	'.mh-ev-Warning td:first-child{border-left:4px solid #d99a1c}',
 	'.mh-explain dt{font-weight:bold;margin-top:.6em}',
@@ -60,7 +61,7 @@ function channelTable(verdicts, dir) {
 		var c = v.channel, chk = {};
 		v.checks.forEach(function(x) { chk[x.metric] = x; });
 		var mhz = function(hz) { var n = H.num(hz); return n == null ? '–' : (n / 1e6).toFixed(n % 1e6 ? 1 : 0); };
-		var lockCell = chk.lock ? cell(c.lock, chk.lock) : null;
+		var lockCell = chk.lock ? cell('%s · %s'.format(c.ch || '–', c.lock), chk.lock) : null;
 		var cells = dir === 'ds' ? [
 			lockCell || E('td', { 'class': 'td' }, [ c.ch || '–' ]),
 			E('td', { 'class': 'td' }, [ c.channel_id ]),
@@ -120,7 +121,7 @@ function charts(D) {
 	D.readings.forEach(function(r) { (D.channelsAt[r.ts] || []).forEach(function(c) { if (c.dir === 'us') usIds[c.channel_id] = c.modulation; }); });
 	var lastUs = (D.channelsAt[(D.readings[D.readings.length - 1] || {}).ts] || []).filter(function(c) { return c.dir === 'us' && !/OFDM/.test(c.modulation || ''); }).length;
 	var usLimit = H.limitsFor({ dir: 'us', modulation: 'SC-QAM' }, lastUs, D.limits).power;
-	var common = { from: from, to: to, spans: spans, marks: marks, gap: gap };
+	var common = { from: from, to: to, spans: spans, marks: marks, gap: gap, interval: D.interval * 60 };
 	var block = function(title, note, chart, leg) {
 		return E('div', { 'class': 'cbi-section' }, [ E('h3', {}, [ title ]), note ? E('p', { 'class': 'mh-note' }, [ note ]) : '', leg || '', chart ]);
 	};

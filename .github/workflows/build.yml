@@ -45,6 +45,18 @@ jobs:
       - name: Test the backend against the fake modem (OpenWrt 23.05 container)
         run: python3 tests/backend.test.py
 
+      - name: Test the web interface in LuCI with a browser (OpenWrt 23.05 container)
+        run: |
+          npm install --no-save playwright-core
+          node tests/luci.test.js
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: luci-screenshots
+          path: .test-out/luci/*.png
+          if-no-files-found: ignore
+
       - name: Build ipk
         run: scripts/build-ipk.sh dist
 

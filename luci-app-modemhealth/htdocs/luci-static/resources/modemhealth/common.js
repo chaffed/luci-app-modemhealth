@@ -277,6 +277,7 @@ function niceTicks(lo, hi, n) {
  *   spans:  [ { from, to, color, label } ] shaded time ranges (outages)
  *   marks:  [ { ts, color, label } ] events, drawn as ticks at the top
  *   gap:    seconds without a point after which a line breaks
+ *   interval: seconds between checks (the width of a bar)
  * }) -> <svg> */
 function lineChart(o) {
 	var W = 720, H = 220, ml = 48, mr = 10, mt = 14, mb = 26;
@@ -315,7 +316,11 @@ function lineChart(o) {
 	}
 	o.series.forEach(function(s) {
 		if (s.bars) {
-			var bw = Math.max((W - ml - mr) / Math.max(s.points.length, 1) * 0.8, 1.5);
+			/* A bar is as wide as the time between checks, not as the
+			 * number of bars would allow: a few checks on a long axis
+			 * must not merge into one block. */
+			var per = (W - ml - mr) * (o.interval || (o.to - o.from) / Math.max(s.points.length, 1)) / Math.max(o.to - o.from, 1);
+			var bw = Math.min(Math.max(per * 0.8, 1.5), 14);
 			s.points.forEach(function(p) {
 				if (p[1] == null || p[1] <= 0) return;
 				svg.appendChild(S('rect', { x: x(p[0]) - bw / 2, y: y(p[1]), width: bw, height: y(Math.max(lo, 0)) - y(p[1]), fill: s.color },

@@ -4,3 +4,5 @@ dist/
 capture-raw/
 __pycache__/
 .test-out/
+node_modules/
+package-lock.json
