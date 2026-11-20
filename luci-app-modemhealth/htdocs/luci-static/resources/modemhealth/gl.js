@@ -119,6 +119,7 @@
 	var ROUTES = {
 		'admin/services/modemhealth': 'overview',
 		'admin/services/modemhealth/overview': 'overview',
+		'admin/services/modemhealth/report': 'report',
 		'admin/services/modemhealth/settings': 'settings'
 	};
 
@@ -403,9 +404,11 @@
 		'.cbi-button-action,.cbi-button-action:hover{background:var(--primary);border-color:var(--primary);color:#fff}',
 		'.cbi-button-action:hover{background:var(--primary-hover);border-color:var(--primary-hover)}',
 		':focus-visible{outline:2px solid var(--primary);outline-offset:2px}',
-		'input,select{font:inherit;color:var(--text-regular);background:var(--mhgl-control);border:1px solid var(--border);border-radius:6px;padding:6px 10px;min-height:36px;box-sizing:border-box;max-width:100%}',
-		'input:focus,select:focus{border-color:var(--primary);outline:none}',
-		'input:focus-visible,select:focus-visible{outline:2px solid var(--primary);outline-offset:1px}',
+		'input,select,textarea{font:inherit;color:var(--text-regular);background:var(--mhgl-control);border:1px solid var(--border);border-radius:6px;padding:6px 10px;min-height:36px;box-sizing:border-box;max-width:100%}',
+		'input:focus,select:focus,textarea:focus{border-color:var(--primary);outline:none}',
+		'input:focus-visible,select:focus-visible,textarea:focus-visible{outline:2px solid var(--primary);outline-offset:1px}',
+		'textarea{min-height:72px}',
+		'.alert-message ul{margin:0 0 .5em 1.2em;padding:0}',
 		'input[type=checkbox]{width:18px;height:18px;min-height:0;vertical-align:-3px;accent-color:var(--primary)}',
 		'.alert-message{border:1px solid var(--warning);background:var(--warning-background);border-radius:6px;padding:10px 14px;margin:10px 0}',
 		'.alert-message.error,.alert-message.danger{border-color:var(--error);background:var(--error-background)}',
@@ -499,6 +502,13 @@
 			[ _('Storage'), [
 				{ key: 'history_days', type: 'int', min: 1, max: 730, optional: true, label: _('Keep history for (days)'),
 					help: _('About 4–8 MB for 90 days at 5-minute checks.') }
+			] ],
+			[ _('Report details'), [
+				{ key: 'isp_name', type: 'text', optional: true, label: _('Provider'), check: textOk(120),
+					help: _('This and the following details are only used on the report.') },
+				{ key: 'subscriber', type: 'text', optional: true, label: _('Subscriber name'), check: textOk(120), help: _('The name the account is in.') },
+				{ key: 'account', type: 'text', optional: true, label: _('Account number'), check: textOk(120) },
+				{ key: 'service_address', type: 'text', optional: true, label: _('Service address'), check: textOk(120) }
 			] ]
 		];
 	}
@@ -755,7 +765,7 @@
 
 	/* ------------------------------------------------------------ page -- */
 
-	var PAGES = [ [ 'overview', _('Overview') ], [ 'settings', _('Settings') ] ];
+	var PAGES = [ [ 'overview', _('Overview') ], [ 'report', _('Report') ], [ 'settings', _('Settings') ] ];
 	var app, nav, view, navSeq = 0;
 
 	function resize() {

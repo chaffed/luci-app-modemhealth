@@ -176,6 +176,14 @@ ok("an emptied limit is removed (the default applies again)", l.us_power_4_good_
 ok("settings not sent are left alone", m.timeout == "15" and m.data_dir == "/etc/modemhealth")
 ok("the password file is not touched by set_config", store.modemhealth_auth.main.password == "the old one")
 
+r = try({ isp_name = "Example Cable, Inc.", subscriber = "Zoë O'Brien", account = "8155 60 012 3456789",
+    service_address = "100 Example Street, Apt #4, Springfield" })
+m = store.modemhealth.main
+ok("report details with commas, apostrophes and accents are kept",
+    r.saved and m.subscriber == "Zoë O'Brien" and m.service_address == "100 Example Street, Apt #4, Springfield" and m.isp_name == "Example Cable, Inc.")
+r = try({ account = "" })
+ok("an emptied report detail is removed", r.saved and store.modemhealth.main.account == nil)
+
 r = try({ interval = "  15  " })
 ok("surrounding spaces are trimmed", r.saved and store.modemhealth.main.interval == "15")
 
@@ -200,6 +208,9 @@ local refused = {
     { "limit that is not a number", { ds_power_good_min = "low" }, "ds_power_good_min" },
     { "limit with a command in it", { ds_power_good_min = "1;reboot" }, "ds_power_good_min" },
     { "limit that does not exist", { ds_power_best_min = "1" }, "ds_power_best_min" },
+    { "report text over 120 bytes", { isp_name = string.rep("x", 121) }, "isp_name" },
+    { "report text with a line break", { subscriber = "A\nB" }, "subscriber" },
+    { "report text with a control character", { account = "12\0273" }, "account" },
     { "the password through set_config", { password = "x" }, "password" },
     { "where the history is kept", { data_dir = "/tmp/x" }, "data_dir" },
     { "a table where text belongs", { username = { "x" } }, "username" },
@@ -274,7 +285,8 @@ r = M.test({ password = "x" })
 ok("test without an answer says so", r.ok == false and r.reason == "no_answer")
 
 -- every setting the LuCI page offers can be set from the panel
-local luci = { "enabled", "interval", "host", "username", "ping_host", "history_days" }
+local luci = { "enabled", "interval", "host", "username", "ping_host", "history_days",
+    "isp_name", "subscriber", "account", "service_address" }
 local missing, n = {}, 0
 for _, k in ipairs(luci) do if not M.FIELDS[k] then missing[#missing + 1] = k end end
 for _ in pairs(M.FIELDS) do n = n + 1 end

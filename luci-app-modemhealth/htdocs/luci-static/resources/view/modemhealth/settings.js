@@ -98,6 +98,7 @@ return view.extend({
 		s.tab('modem', _('Modem'));
 		s.tab('schedule', _('Schedule'));
 		s.tab('storage', _('Storage'));
+		s.tab('report', _('Report details'));
 
 		o = s.taboption('modem', form.Value, 'host', _('Modem address'),
 			_('SURFboard modems answer at 192.168.100.1 through the router\'s WAN port.'));
@@ -169,6 +170,17 @@ return view.extend({
 		o.datatype = 'and(uinteger,range(1,730))';
 		o.default = '90';
 		o.placeholder = '90';
+
+		/* Printed on the report so that the provider can match it to an
+		 * account; one line of text each. */
+		[ [ 'isp_name', _('Provider'), _('This and the following details are only used on the report.') ],
+		  [ 'subscriber', _('Subscriber name'), _('The name the account is in.') ],
+		  [ 'account', _('Account number') ],
+		  [ 'service_address', _('Service address') ] ].forEach(function(f) {
+			o = s.taboption('report', form.Value, f[0], f[1], f[2]);
+			o.datatype = 'maxlength(120)';
+			o.rmempty = true;
+		});
 
 		limitsSection(m);
 

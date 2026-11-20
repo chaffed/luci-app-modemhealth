@@ -135,6 +135,11 @@ local FIELDS = {
     username = { check = text(64) },
     ping_host = { optional = true, check = host_only },
     history_days = { optional = true, check = range(1, 730) },
+    -- Printed on the report.
+    isp_name = { optional = true, check = text(120) },
+    subscriber = { optional = true, check = text(120) },
+    account = { optional = true, check = text(120) },
+    service_address = { optional = true, check = text(120) },
 }
 
 -- The health limits (health.js: limitList), each with up to four bounds,

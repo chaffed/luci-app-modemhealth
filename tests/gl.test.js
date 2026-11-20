@@ -39,7 +39,7 @@ async function main() {
 		var frame = function() { return page.frames().filter(function(f) { return f !== page.mainFrame(); })[0]; };
 		var F = page.frameLocator('iframe[title="Modem Health"]');
 		await F.locator('.mhgl-nav').waitFor();
-		eq(await F.locator('.mhgl-nav button').allTextContents(), [ 'Overview', 'Settings' ], 'panel: Overview and Settings');
+		eq(await F.locator('.mhgl-nav button').allTextContents(), [ 'Overview', 'Report', 'Settings' ], 'panel: Overview, Report and Settings');
 
 		/* ----------------------------------------------- no password saved yet */
 		await F.locator('svg.mh-chart').first().waitFor({ timeout: 60000 });
@@ -168,9 +168,40 @@ async function main() {
 		eq([ after.status_reads - before.status_reads, after.bad_signatures, after.login_failures ], [ 1, 0, 1 ],
 			'check now: one read of the modem; every request signed correctly; the only refused login was the wrong-password test');
 
+		/* ------------------------------------------------------------- Report */
+		await F.locator('.mhgl-nav button[data-page=settings]').click();
+		await F.locator('#mhgl-f-subscriber').fill('Zoë O\'Brien <b>');
+		await F.locator('#mhgl-f-account').fill('8155 60 012 3456789');
+		ok(/^Saved\./.test(await save()), 'settings: report details are saved from the panel');
+		eq(router('uci get modemhealth.main.subscriber; uci get modemhealth.main.account').trim().split('\n'), [ 'Zoë O\'Brien <b>', '8155 60 012 3456789' ],
+			'settings: and stored as typed');
+		await F.locator('.mhgl-nav button[data-page=report]').click();
+		var RF = F.frameLocator('#mh-report-frame'), rt = '';
+		for (var k = 0; k < 300 && !/Cable line health report/.test(rt); k++) {
+			rt = await RF.locator('body').innerText().catch(function() { return ''; });
+			await sleep(200);
+		}
+		await sleep(500);
+		await page.screenshot({ path: path.join(SHOTS, 'report.png'), fullPage: true });
+		ok(/The line had faults in this period\./.test(rt) && /13 losses of downstream sync/.test(rt) && /Subscriber\s+Zoë O'Brien <b>/.test(rt),
+			'report: shown in the panel, with the findings and the account details (markup as text)');
+		ok(new RegExp('Checks made\\s+' + (made.counts.readings + 1) + ' checks').test(rt), 'report: every stored check counted, the one made with Check now included');
+		var srcdoc = await F.locator('#mh-report-frame').getAttribute('srcdoc');
+		var rdl = (await Promise.all([ page.waitForEvent('download'), F.locator('button:has-text("Download report (HTML)")').click() ]))[0];
+		var rfile = path.join(out, rdl.suggestedFilename());
+		await rdl.saveAs(rfile);
+		ok(fs.readFileSync(rfile, 'utf8') === srcdoc && /^<!doctype html>/.test(srcdoc) && !/<script/i.test(srcdoc), 'report: the download from the panel is the document shown, and has no script');
+		sizes = await page.evaluate(function() {
+			var f = document.querySelector('iframe'), d = f.contentDocument;
+			return [ f.offsetHeight, d.getElementById('mhgl-app').offsetHeight, d.getElementById('mh-report-frame').offsetHeight ];
+		});
+		ok(sizes[0] >= sizes[1] && sizes[2] > 2000 && sizes[1] > sizes[2], 'report: both frames grow to fit the document (' + sizes.join(', ') + ')');
+
 		/* the panel's dark colours */
 		await page.goto(rig.WEB + '/gl-panel.html?theme=dark');
-		await F.locator('svg.mh-chart').first().waitFor({ timeout: 60000 });
+		await F.locator('.mhgl-nav').waitFor();
+		eq(await F.locator('.mhgl-nav button[aria-current=page]').textContent(), 'Report', 'panel: opened again, it shows the page that was open last');
+		await openOverview();
 		eq(await frame().evaluate(function() {
 			return [ document.documentElement.getAttribute('data-theme'), getComputedStyle(document.documentElement).getPropertyValue('--background-card').trim() ];
 		}), [ 'dark', '#1e1e2a' ], 'panel: its dark colours are taken over');

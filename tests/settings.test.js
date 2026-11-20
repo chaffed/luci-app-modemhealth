@@ -27,7 +27,8 @@ var config = read('root/etc/config/modemhealth');
 
 /* LuCI: s.taboption('tab', form.X, 'name', ...); names starting with "_"
  * are not stored (the password field, the test button and its result). */
-var luciAll = all(/taboption\('\w+', form\.\w+, '(\w+)'/g, luci);
+var luciAll = all(/taboption\('\w+', form\.\w+, '(\w+)'/g, luci)
+	.concat(/taboption\('report', form\.Value, f\[0\]/.test(luci) ? all(/\[ '(\w+)', _\('/g, /\/\* Printed on the report[\s\S]*?\.forEach/.exec(luci)[0]) : []);
 var luciOptions = luciAll.filter(function(n) { return n.charAt(0) !== '_'; });
 /* The panel's form: { key: 'name', type: ... } in sections(). */
 var glAll = all(/\{ key: '(\w+)', type: '/g, gl);
@@ -36,14 +37,18 @@ var glOptions = glAll.filter(function(n) { return n !== 'password'; });
 var fieldsBlock = /local FIELDS = \{\n([\s\S]*?)\n\}/.exec(lua)[1];
 var luaFields = all(/^    (\w+) = \{/gm, fieldsBlock);
 
-ok(luciOptions.length >= 6, 'LuCI offers %d settings: %s'.replace('%d', luciOptions.length).replace('%s', luciOptions.join(', ')));
+ok(luciOptions.length >= 10, 'LuCI offers %d settings: %s'.replace('%d', luciOptions.length).replace('%s', luciOptions.join(', ')));
 eq(sorted(glOptions), sorted(luciOptions), 'the panel\'s form offers the same settings as LuCI\'s');
 eq(sorted(luaFields), sorted(luciOptions), 'the panel\'s module accepts the same settings, and no others');
-var defaults = all(/^\toption (\w+) /gm, config);
-ok(luciOptions.every(function(n) { return defaults.indexOf(n) >= 0; }), 'each has a default in /etc/config/modemhealth');
+/* Settings with a default ship it in the package; the report details
+ * (free text) have none. */
+var defaults = all(/^\toption (\w+) /gm, config), REPORT = [ 'isp_name', 'subscriber', 'account', 'service_address' ];
+var withDefault = luciOptions.filter(function(n) { return REPORT.indexOf(n) < 0; });
+ok(withDefault.every(function(n) { return defaults.indexOf(n) >= 0; }) && REPORT.every(function(n) { return luciOptions.indexOf(n) >= 0 && defaults.indexOf(n) < 0; }),
+	'each has a default in /etc/config/modemhealth, except the four report details');
 var glDefaults = all(/(\w+): '/g, /var DEFAULTS = \{([^}]*)\}/.exec(gl)[1]);
-eq(sorted(glDefaults), sorted(luciOptions), 'the panel\'s form knows the default of each');
-luciOptions.forEach(function(n) {
+eq(sorted(glDefaults), sorted(withDefault), 'the panel\'s form knows the default of each');
+withDefault.forEach(function(n) {
 	var inConfig = new RegExp("option " + n + " '([^']*)'").exec(config)[1];
 	var inGl = new RegExp(n + ": '([^']*)'").exec(/var DEFAULTS = \{([^}]*)\}/.exec(gl)[1])[1];
 	eq(inGl, inConfig, 'default of ' + n + ' is the same in the panel as in the package');
@@ -52,6 +57,7 @@ luciOptions.forEach(function(n) {
 /* The password: a field in both forms, never a stored setting. */
 ok(luciAll.indexOf('_password') >= 0 && glAll.indexOf('password') >= 0, 'both forms have a password field');
 ok(luciAll.indexOf('_test') >= 0 && /call\('test', \{ host: /.test(gl), 'both forms have Test connection');
+eq(read('root/usr/bin/modemhealth').match(/^VERSION=([0-9.]+)/m)[1], read('Makefile').match(/^PKG_VERSION:=([0-9.]+)/m)[1], 'the backend reports the package\'s version');
 ok(luaFields.indexOf('password') < 0 && !/option password/.test(config), 'the password is not among the settings the forms load');
 ok(/cfgvalue = function\(\) \{ return ''; \}/.test(luci) && !/password[^\n]*\.value = (?!'')/.test(gl), 'neither form fills the password field in');
 var acl = JSON.parse(read('root/usr/share/rpcd/acl.d/luci-app-modemhealth.json'))['luci-app-modemhealth'];
@@ -72,16 +78,16 @@ ok(/H\.limitList\(\)/.test(gl) && /H\.limitFields\(/.test(gl), 'the panel\'s for
 ok(/config limits 'limits'/.test(config), 'the limits section exists in the package\'s settings');
 
 /* The views only use what the panel's stand-ins provide. */
-var overview = read('htdocs/luci-static/resources/view/modemhealth/overview.js');
-var common = fs.readFileSync(path.join(RES, 'modemhealth/common.js'), 'utf8');
+var overview = read('htdocs/luci-static/resources/view/modemhealth/overview.js') + '\n' + read('htdocs/luci-static/resources/view/modemhealth/report.js');
+var common = fs.readFileSync(path.join(RES, 'modemhealth/common.js'), 'utf8') + '\n' + fs.readFileSync(path.join(RES, 'modemhealth/report.js'), 'utf8');
 var requires = all(/^'require ([\w.]+)/gm, overview + '\n' + common).filter(function(n, i, a) { return a.indexOf(n) === i; });
 var builtin = all(/(\w+):/g, /var BUILTIN = \{([\s\S]*?)\};/.exec(gl)[1]).concat([ 'rpc', 'ui', 'uci', 'dom' ]);
 ok(requires.every(function(n) { return /^modemhealth\./.test(n) || builtin.indexOf(n) >= 0; }),
-	'the Overview needs only modules the panel has a stand-in for (%s)'.replace('%s', requires.join(', ')));
-var used = all(/\bui\.(\w+)\(/g, overview).concat(all(/\buci\.(\w+)\(/g, overview)).concat(all(/\bL\.(\w+)\(/g, overview + common));
+	'the Overview and the Report need only modules the panel has a stand-in for (%s)'.replace('%s', requires.join(', ')));
+var used = all(/\bui\.(\w+)\(/g, overview).concat(all(/\buci\.(\w+)\(/g, overview)).concat(all(/\bdom\.(\w+)\(/g, overview)).concat(all(/\bL\.(\w+)\(/g, overview + common));
 used = used.filter(function(n, i, a) { return a.indexOf(n) === i; });
 ok(used.every(function(n) { return new RegExp('\\b' + n + ': function').test(gl); }),
-	'every ui, uci and L function the Overview calls has one (%s)'.replace('%s', used.join(', ')));
+	'every ui, uci, dom and L function they call has one (%s)'.replace('%s', used.join(', ')));
 var methods = all(/method: '(\w+)'/g, common), renamed = { status: 'get_status', data: 'get_data' };
 ok(methods.every(function(m) { return new RegExp('^M\\.' + (renamed[m] || m) + ' = function', 'm').test(lua); }),
 	'every call the pages make exists in the module (%s)'.replace('%s', methods.join(', ')));
