@@ -56,6 +56,12 @@ var SOURCES = {
 		judgement: true,
 		title: 'Modem Health\'s own threshold',
 		note: 'No published standard sets this threshold; it is Modem Health\'s choice and can be changed in Settings.'
+	},
+	settings: {
+		kind: 'judgement',
+		judgement: true,
+		title: 'Changed by the owner in this router\'s settings',
+		note: 'This limit differs from Modem Health\'s default, so the sources of the default do not back it.'
 	}
 };
 
@@ -159,6 +165,57 @@ var LIMITS = {
 		sources: [ 'judgement' ]
 	}
 };
+
+/* ------------------------------------------------------------ settings -- */
+
+/* Every limit that has bounds, with the name its settings use:
+ * [ { key, limit } ]. The upstream SC-QAM limits by channel count are
+ * us_power_1 ... us_power_4. */
+function limitList(limits) {
+	var L = limits || LIMITS, out = [];
+	Object.keys(L).forEach(function(k) {
+		if (k === 'us_power_by_channels')
+			Object.keys(L[k]).forEach(function(n) { out.push({ key: 'us_power_' + n, limit: L[k][n] }); });
+		else if (L[k].good)
+			out.push({ key: k, limit: L[k] });
+	});
+	return out;
+}
+
+/* The settings for one limit: option names and the bounds they set. Only
+ * bounds the default has can be set (a limit with no upper bound keeps
+ * none). Shares are entered as percentages. */
+var BOUNDS = [ [ 'good_min', 'good', 0 ], [ 'good_max', 'good', 1 ], [ 'acceptable_min', 'marginal', 0 ], [ 'acceptable_max', 'marginal', 1 ] ];
+function limitFields(key, limit) {
+	var scale = limit.unit === 'share' ? 100 : 1;
+	return BOUNDS.filter(function(b) { return limit[b[1]][b[2]] != null; }).map(function(b) {
+		return { option: key + '_' + b[0], band: b[1], end: b[2], scale: scale, value: limit[b[1]][b[2]] * scale };
+	});
+}
+
+/* The limits with the owner's settings applied. get(option) returns the
+ * stored setting ('' or undefined = the default). A changed limit cites
+ * the "settings" source instead of the default's, and keeps the default in
+ * .default so the report can show both.
+ * -> { limits, changed: [ { key, limit } ] } */
+function applySettings(get) {
+	var limits = JSON.parse(JSON.stringify(LIMITS)), changed = [];
+	limitList(limits).forEach(function(it) {
+		var L = it.limit, orig = { good: L.good.slice(), marginal: L.marginal.slice() }, diff = false;
+		limitFields(it.key, L).forEach(function(f) {
+			var v = num(get(f.option));
+			if (v == null) return;
+			v /= f.scale;
+			if (v !== L[f.band][f.end]) { L[f.band][f.end] = v; diff = true; }
+		});
+		if (!diff) return;
+		L.default = orig;
+		L.default_sources = L.sources;
+		L.sources = [ 'settings' ];
+		changed.push(it);
+	});
+	return { limits: limits, changed: changed };
+}
 
 /* ------------------------------------------------------------- helpers -- */
 
@@ -452,6 +509,7 @@ return baseclass.extend({
 	HEALTHY: HEALTHY, DEGRADED: DEGRADED, FAILING: FAILING,
 	SOURCES: SOURCES, LIMITS: LIMITS, DISRUPTIVE: DISRUPTIVE,
 	num: num, band: band, limitsFor: limitsFor,
+	limitList: limitList, limitFields: limitFields, applySettings: applySettings,
 	channelVerdict: channelVerdict, readingVerdict: readingVerdict,
 	classifyEvent: classifyEvent, parseModemLog: parseModemLog,
 	modemSeconds: modemSeconds, reregistrations: reregistrations, outages: outages,

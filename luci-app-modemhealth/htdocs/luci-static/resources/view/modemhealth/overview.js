@@ -1,6 +1,7 @@
 'use strict';
 'require view';
 'require ui';
+'require uci';
 'require modemhealth.common as mh';
 
 /*
@@ -118,20 +119,20 @@ function charts(D) {
 	var usIds = {};
 	D.readings.forEach(function(r) { (D.channelsAt[r.ts] || []).forEach(function(c) { if (c.dir === 'us') usIds[c.channel_id] = c.modulation; }); });
 	var lastUs = (D.channelsAt[(D.readings[D.readings.length - 1] || {}).ts] || []).filter(function(c) { return c.dir === 'us' && !/OFDM/.test(c.modulation || ''); }).length;
-	var usLimit = H.limitsFor({ dir: 'us', modulation: 'SC-QAM' }, lastUs).power;
+	var usLimit = H.limitsFor({ dir: 'us', modulation: 'SC-QAM' }, lastUs, D.limits).power;
 	var common = { from: from, to: to, spans: spans, marks: marks, gap: gap };
 	var block = function(title, note, chart, leg) {
 		return E('div', { 'class': 'cbi-section' }, [ E('h3', {}, [ title ]), note ? E('p', { 'class': 'mh-note' }, [ note ]) : '', leg || '', chart ]);
 	};
 	var out = [];
 	out.push(block(_('Downstream power'), _('Lowest and highest SC-QAM channel at each check. Shaded: good (green) and acceptable (amber) range.'),
-		mh.lineChart(Object.assign({ title: _('Downstream power'), fitBands: false, bands: bandsFor(H.LIMITS.ds_power), series: [
+		mh.lineChart(Object.assign({ title: _('Downstream power'), fitBands: false, bands: bandsFor(D.limits.ds_power), series: [
 			{ name: _('lowest'), color: mh.C.series[0], points: seriesBy(D, 'ds', scqam, min) },
 			{ name: _('highest'), color: mh.C.series[1], points: seriesBy(D, 'ds', scqam, max) } ] }, common)),
 		mh.legend([ { name: _('lowest channel'), color: mh.C.series[0] }, { name: _('highest channel'), color: mh.C.series[1] },
 			{ name: _('outage'), color: mh.C.bad, faint: true } ])));
 	out.push(block(_('Downstream SNR and MER'), _('Worst SC-QAM channel (SNR) and worst OFDM channel (MER) at each check.'),
-		mh.lineChart(Object.assign({ title: _('Downstream SNR'), bands: bandsFor(H.LIMITS.ds_snr), series: [
+		mh.lineChart(Object.assign({ title: _('Downstream SNR'), bands: bandsFor(D.limits.ds_snr), series: [
 			{ name: _('worst SNR'), color: mh.C.series[0], points: seriesBy(D, 'ds', snr, min) },
 			{ name: _('worst MER (OFDM)'), color: mh.C.series[2], points: seriesBy(D, 'ds', mer, min), dash: '4 3' } ] }, common)),
 		mh.legend([ { name: _('worst SC-QAM SNR'), color: mh.C.series[0] }, { name: _('worst OFDM MER'), color: mh.C.series[2] } ])));
@@ -193,15 +194,28 @@ return view.extend({
 	days: 1,
 
 	load: function() {
-		return mh.callStatus().catch(function() { return {}; });
+		return Promise.all([
+			mh.callStatus().catch(function() { return {}; }),
+			uci.load('modemhealth').catch(function() {})
+		]).then(function(r) { return r[0]; });
 	},
 
 	loadPeriod: function(st) {
 		var until = st.now || Math.floor(Date.now() / 1000);
-		return mh.load(until - this.days * 86400, until).then(function(D) {
+		var mine = H.applySettings(function(o) { return uci.get('modemhealth', 'limits', o); });
+		return mh.load(until - this.days * 86400, until, st.interval || 5).then(function(D) {
 			D.interval = st.interval || 5;
-			return mh.analyse(D, D.interval);
+			D.changedLimits = mine.changed;
+			return mh.analyse(D, D.interval, mine.limits);
 		});
+	},
+
+	download: function(D, kind) {
+		var name = 'modemhealth-%s-%s.csv'.format(kind, mh.fmtTime(D.until).replace(/[: ]/g, '-'));
+		var a = E('a', { 'href': URL.createObjectURL(new Blob([ mh.toCSV(D, kind) ], { type: 'text/csv' })), 'download': name });
+		document.body.appendChild(a);
+		a.click();
+		setTimeout(function() { URL.revokeObjectURL(a.href); a.remove(); }, 1000);
 	},
 
 	renderStatus: function(st, D) {
@@ -263,8 +277,17 @@ return view.extend({
 				var body = [
 					E('style', {}, [ CSS ]),
 					E('h2', {}, [ _('Modem Health') ]),
-					E('p', {}, [ _('Period: '), picker ]),
+					E('p', {}, [ _('Period: '), picker, ' ',
+						E('span', { 'class': 'mh-note' }, [ _('Download as CSV:') ]), ' ' ].concat([
+						[ 'readings', _('Checks') ], [ 'channels', _('Channels') ], [ 'events', _('Events') ]
+					].map(function(k) {
+						return E('button', { 'class': 'cbi-button', 'style': 'margin-left:.3em', 'click': function() { self.download(D, k[0]); } }, [ k[1] ]);
+					}))),
 					self.renderStatus(st, D),
+					D.changedLimits.length ? E('div', { 'class': 'alert-message notice' }, [
+						_('Judged against limits you changed in Settings: %s. The others are Modem Health\'s sourced defaults.')
+							.format(D.changedLimits.map(function(c) { return c.limit.label; }).join('; '))
+					]) : '',
 					E('div', { 'class': 'cbi-section' }, [ E('h3', {}, [ _('Outages') ]), listOrNone(outageItems, _('No outages in this period.')) ]),
 					E('div', { 'class': 'cbi-section' }, [ E('h3', {}, [ _('Restarts and re-registrations') ]), listOrNone(restartItems, _('None in this period.')) ]),
 					E('div', { 'class': 'cbi-section' }, [

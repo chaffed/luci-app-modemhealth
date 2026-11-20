@@ -17,11 +17,52 @@ var REASONS = {
 	no_password: _('No password entered.'),
 	login_refused: _('The modem refused the user name or password.'),
 	unreachable: _('The modem did not answer at this address. Is it a cable modem in bridge mode, connected to the router\'s WAN port?'),
-	timeout: _('The modem did not answer in time.'),
+	timeout: _('Nothing answered at this address in time. Check the modem address, and that the modem is on and connected to the router\'s WAN port.'),
 	tls_error: _('Could not set up a secure connection to the modem.'),
 	not_a_supported_modem: _('Something answered at this address, but it is not a supported modem (SURFboard S33 or S34).'),
 	no_openssl: _('The openssl-util package is missing on the router.')
 };
+
+var H = mh.health;
+var BOUND_TEXT = { good_min: _('good from'), good_max: _('good up to'), acceptable_min: _('acceptable from'), acceptable_max: _('acceptable up to') };
+var SIGNAL = /^(ds_|us_)/;
+
+/* The health limits: one field per bound, empty = the default. */
+function limitsSection(m) {
+	var s = m.section(form.NamedSection, 'limits', 'limits', _('Health limits'),
+		_('What counts as good, acceptable (marginal) and out of spec. Leave a field empty to use Modem Health\'s default, which comes from the DOCSIS specifications and manufacturers\' guidance where they publish one. The dashboard and the report say which limits you changed, and that the default\'s sources no longer back them.'));
+	s.anonymous = true;
+	s.tab('signal', _('Signal levels'));
+	s.tab('events', _('Events'));
+	H.limitList().forEach(function(it) {
+		var fields = H.limitFields(it.key, it.limit);
+		var unit = it.limit.unit === 'share' ? '%' : it.limit.unit;
+		var defText = fields.map(function(f) { return '%s %s'.format(BOUND_TEXT[f.option.slice(it.key.length + 1)], f.value); }).join(', ');
+		var sources = it.limit.sources.map(function(k) { return H.SOURCES[k].kind === 'judgement' ? _('Modem Health\'s judgement') : H.SOURCES[k].title; });
+		fields.forEach(function(f, i) {
+			var o = s.taboption(SIGNAL.test(it.key) ? 'signal' : 'events', form.Value, f.option,
+				'%s: %s'.format(it.limit.label, BOUND_TEXT[f.option.slice(it.key.length + 1)]),
+				i === fields.length - 1 ? _('Default: %s (%s). Source: %s.').format(defText, unit, sources.join('; ')) : null);
+			o.placeholder = String(f.value);
+			o.datatype = 'float';
+			o.rmempty = true;
+			/* The good range must lie within the acceptable range. */
+			o.validate = function(section_id, value) {
+				var b = { good: it.limit.good.slice(), marginal: it.limit.marginal.slice() };
+				fields.forEach(function(g) {
+					var opt = this.section.children.filter(function(c) { return c.option === g.option; })[0];
+					var v = H.num(opt ? opt.formvalue(section_id) : null);
+					if (v != null) b[g.band][g.end] = v;
+				}, this);
+				var lo = function(x) { return x == null ? -Infinity : x; }, hi = function(x) { return x == null ? Infinity : x; };
+				if (lo(b.good[0]) > hi(b.good[1])) return _('The good range is empty: "from" is above "up to".');
+				if (lo(b.good[0]) < lo(b.marginal[0]) || hi(b.good[1]) > hi(b.marginal[1])) return _('The good range must lie within the acceptable range.');
+				return true;
+			};
+		});
+	});
+	return s;
+}
 
 function reasonText(r) {
 	if (REASONS[r]) return REASONS[r];
@@ -117,6 +158,8 @@ return view.extend({
 		o.datatype = 'and(uinteger,range(1,730))';
 		o.default = '90';
 		o.placeholder = '90';
+
+		limitsSection(m);
 
 		return m.render();
 	},

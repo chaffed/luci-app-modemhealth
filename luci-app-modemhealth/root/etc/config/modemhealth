@@ -8,3 +8,5 @@ config modemhealth 'main'
 	option ping_host '1.1.1.1'
 	option history_days '90'
 	option data_dir '/etc/modemhealth'
+
+config limits 'limits'

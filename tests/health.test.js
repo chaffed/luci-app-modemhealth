@@ -148,5 +148,26 @@ var quiet = H.periodVerdict({ hours: 24 * 7, readings: new Array(2016).fill({ le
 eq(quiet.level, 'healthy', 'a week of good readings with no events is healthy');
 eq(H.periodVerdict({ hours: 24, readings: [ { level: 'unknown' } ], events: [] }).level, 'unknown', 'only failed readings: unknown, not healthy');
 
+/* ----------------------------------------------- limits from the settings */
+var none = H.applySettings(function() { return ''; });
+eq([ none.changed.length, JSON.stringify(none.limits) === JSON.stringify(H.LIMITS) ], [ 0, true ], 'settings: empty settings leave every default');
+eq(H.limitList().length, 17, 'settings: 17 limits with bounds (us_power_1 ... us_power_4 among them)');
+ok(H.limitList().every(function(it) { return H.limitFields(it.key, it.limit).length > 0; }), 'settings: each has at least one bound to set');
+eq(H.limitFields('ds_snr', H.LIMITS.ds_snr).map(function(f) { return f.option; }), [ 'ds_snr_good_min', 'ds_snr_acceptable_min' ],
+	'settings: a limit without an upper bound gets none');
+eq(H.limitFields('share_readings_failing', H.LIMITS.share_readings_failing).map(function(f) { return f.value; }), [ 0, 5 ],
+	'settings: shares are set as percentages');
+var set = { ds_power_good_min: '-5', ds_power_good_max: '7', us_power_4_acceptable_max: '53', share_readings_failing_acceptable_max: '10', t3_per_day_good_max: 'x' };
+var mine = H.applySettings(function(o) { return set[o]; });
+eq(mine.changed.map(function(c) { return c.key; }), [ 'ds_power', 'us_power_4', 'share_readings_failing' ],
+	'settings: changed limits listed; a value equal to the default or not a number changes nothing');
+eq([ mine.limits.ds_power.good, mine.limits.ds_power.default.good, mine.limits.ds_power.sources ], [ [ -5, 7 ], [ -7, 7 ], [ 'settings' ] ],
+	'settings: a changed limit cites the settings and keeps the default for the report');
+eq([ mine.limits.us_power_by_channels[4].marginal[1], mine.limits.share_readings_failing.marginal[1], H.LIMITS.ds_power.good[0] ], [ 53, 0.1, -7 ],
+	'settings: upstream by channel count and shares applied; the defaults themselves untouched');
+eq([ H.channelVerdict({ dir: 'ds', power_dbmv: '-6', snr_db: '40' }).level, H.channelVerdict({ dir: 'ds', power_dbmv: '-6', snr_db: '40' }, 1, mine.limits).level ],
+	[ 'good', 'marginal' ], 'settings: verdicts use the changed limits');
+ok(H.SOURCES.settings.judgement, 'settings: the settings source is marked as judgement');
+
 console.log(fail ? '\n' + fail + ' check(s) failed' : '\nall checks passed');
 process.exit(fail ? 1 : 0);

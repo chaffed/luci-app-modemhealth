@@ -12,6 +12,8 @@ if [ -n "$old" ]; then
 	uci commit modemhealth
 fi
 chmod 600 /etc/config/modemhealth_auth
+# Health limits changed in Settings (0.1.0-r3).
+uci -q get modemhealth.limits >/dev/null || { uci set modemhealth.limits=limits; uci commit modemhealth; }
 # The rpcd plugin and the menu entry: visible without a reboot.
 rm -f /tmp/luci-indexcache* 2>/dev/null
 rm -rf /tmp/luci-modulecache 2>/dev/null

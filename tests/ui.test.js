@@ -30,7 +30,18 @@ function eq(got, want, name) {
 var baseclass = { extend: function(o) { return o; } };
 var health = new Function('baseclass', fs.readFileSync(path.join(RES, 'modemhealth/health.js'), 'utf8'))(baseclass);
 var served = {};
-var rpc = { declare: function(o) { return function() { return Promise.resolve(served[o.method]); }; } };
+/* data(since, until) answers like the backend: rows whose first column
+ * is within the range, each part with its header. */
+var dataCalls = 0;
+var rpc = { declare: function(o) { return function(since, until) {
+	if (o.method !== 'data') return Promise.resolve(served[o.method]);
+	dataCalls++;
+	var d = served.data, cut = function(t) {
+		var l = t.split('\n').filter(Boolean);
+		return [ l[0] ].concat(l.slice(1).filter(function(r) { var ts = +r.split(',')[0]; return ts >= since && ts <= until; })).join('\n') + '\n';
+	};
+	return Promise.resolve({ readings: cut(d.readings), channels: cut(d.channels), events: cut(d.events), channelmap: d.channelmap });
+}; } };
 var mh = new Function('baseclass', 'rpc', 'health', fs.readFileSync(path.join(RES, 'modemhealth/common.js'), 'utf8'))(baseclass, rpc, health);
 
 /* What the backend stores, built from the real S34 capture. */
@@ -63,8 +74,9 @@ var events = [ 'first_seen_ts,modem_time,clock_offset_s,level,message' ].concat(
 	.map(function(e) { return [ T + 6 * S, e.time, OFFSET, e.level, e.message.replace(/;CM-MAC=.*$/, '').replace(/,/g, '') ].join(','); }));
 served.data = { readings: readings.join('\n') + '\n', channels: channels.join('\n') + '\n', events: events.join('\n') + '\n', channelmap: map.join('\n') + '\n' };
 
-mh.load(T - 3 * 3600, T + 7 * S).then(function(D) {
+mh.load(T - 6 * 3600, T + 7 * S, 1).then(function(D) {
 	eq(D.readings.length, 7, 'load: all readings');
+	eq([ dataCalls, D.channels.length ], [ 2, 7 * 39 - 39 ], 'load: asked for in pieces (250 checks at 1 minute = 4 h 10 min) and put back together without loss');
 	var c = D.channelsAt[String(T)].filter(function(x) { return x.dir === 'ds' && x.channel_id === '194'; })[0];
 	eq([ c.modulation, c.freq_hz, c.ch ], [ 'OFDM PLC', '957000000', '34' ], 'load: channels joined to the line-up (modulation, frequency, index)');
 	var u = D.channelsAt[String(T)].filter(function(x) { return x.dir === 'us' && x.channel_id === '41'; })[0];
@@ -102,6 +114,20 @@ mh.load(T - 3 * 3600, T + 7 * S).then(function(D) {
 	eq(grouped.map(function(g) { return mh.groupedText(g); }),
 		[ 'Upstream power (SC-QAM, 4 channels) marginal on 4 channels: 50 to 50.8 dBmV.' ],
 		'texts: the four marginal upstream channels are one line with the range of values');
+
+	/* CSV export */
+	var csv = function(kind) { return mh.toCSV(D, kind).split('\r\n').filter(Boolean); };
+	eq([ csv('readings').length, csv('channels').length, csv('events').length ], [ 1 + 7, 1 + 6 * 39, 1 + D.events.length ], 'csv: a header and every row of the period');
+	ok(/^time,ts,result,reason,/.test(csv('readings')[0]) && /^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d,1795000000,ok,/.test(csv('readings')[1]), 'csv: readings start with the local time');
+	ok(csv('channels').some(function(l) { return /,ds,34,194,OFDM PLC,957000000,/.test(l); }), 'csv: channels carry the line-up (index, modulation, frequency)');
+	eq([ mh.csvField('=HYPERLINK("x")'), mh.csvField('-1.4'), mh.csvField('@SUM'), mh.csvField('a,b'), mh.csvField(null) ],
+		[ '"\'=HYPERLINK(""x"")"', '-1.4', '\'@SUM', '"a,b"', '' ], 'csv: formulas defused, numbers kept, commas and quotes quoted');
+
+	/* limits from the settings */
+	var mine = health.applySettings(function(o) { return { us_power_4_good_max: '51', us_power_4_acceptable_max: '53' }[o]; });
+	var D2 = mh.analyse(D, 5, mine.limits);
+	eq([ D2.readings[0].verdict.level, D2.limits === mine.limits ], [ 'healthy', true ], 'analyse: judged against the limits from the settings');
+	mh.analyse(D, 5);
 }).catch(function(e) { fail++; console.log('FAIL ' + e.stack); }).then(function() {
 	console.log(fail ? '\n' + fail + ' check(s) failed' : '\nall checks passed');
 	process.exit(fail ? 1 : 0);

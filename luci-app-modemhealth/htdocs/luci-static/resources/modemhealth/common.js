@@ -57,9 +57,24 @@ function eventTime(e) {
 
 /* Everything stored between since and until (epoch seconds), joined up:
  * channels carry their modulation, frequency and width from the line-up,
- * events their kind. */
-function load(since, until) {
-	return callData(since, until).then(function(d) {
+ * events their kind.
+ *
+ * A ubus reply fails somewhere between 1 and 2 MB, and a check stores
+ * about 1.4 KB, so the period is asked for in pieces of 250 checks
+ * (about 350 KB, 21 hours at 5-minute checks), which LuCI sends as one request. */
+function load(since, until, intervalMin) {
+	var step = Math.max(3600, (intervalMin || 5) * 60 * 250), calls = [];
+	for (var a = since; a <= until; a += step)
+		calls.push(callData(a, Math.min(a + step - 1, until)));
+	return Promise.all(calls).then(function(parts) {
+		var join = function(k) {
+			return parts.map(function(p, i) {
+				var t = String((p || {})[k] || '');
+				return i ? t.slice(t.indexOf('\n') + 1) : t;
+			}).join('');
+		};
+		return { readings: join('readings'), channels: join('channels'), events: join('events'), channelmap: (parts[0] || {}).channelmap };
+	}).then(function(d) {
 		var map = {};
 		parseCSV(d.channelmap).forEach(function(m) { map[m.dir + ',' + m.channel_id] = m; });
 		var channels = parseCSV(d.channels).map(function(c) {
@@ -76,13 +91,15 @@ function load(since, until) {
 		}).filter(function(e) { return e.ts >= since && e.ts <= until; })
 		  .sort(function(a, b) { return a.ts - b.ts; });
 		var readings = parseCSV(d.readings).sort(function(a, b) { return a.ts - b.ts; });
-		return { since: since, until: until, readings: readings, channelsAt: byTs, events: events };
+		return { since: since, until: until, readings: readings, channels: channels, channelsAt: byTs, events: events };
 	});
 }
 
-/* Verdicts for every reading, and for the whole period. */
-function analyse(D, intervalMin) {
-	D.readings.forEach(function(r) { r.verdict = health.readingVerdict(r, D.channelsAt[r.ts] || []); });
+/* Verdicts for every reading, and for the whole period. limits: from
+ * health.applySettings (default: health.LIMITS). */
+function analyse(D, intervalMin, limits) {
+	D.limits = limits = limits || health.LIMITS;
+	D.readings.forEach(function(r) { r.verdict = health.readingVerdict(r, D.channelsAt[r.ts] || [], limits); });
 	var outages = health.outages(D.readings, Math.max(1800, (intervalMin || 5) * 60 * 3));
 	var disruptive = D.events.filter(function(e) { return e.kind !== 'login'; });
 	var hours = Math.max((D.until - D.since) / 3600, 1 / 60);
@@ -98,7 +115,7 @@ function analyse(D, intervalMin) {
 		events: disruptive,
 		reboots: D.reboots.length,
 		outages: outages
-	});
+	}, limits);
 	D.period.hours = hours;
 	return D;
 }
@@ -201,6 +218,39 @@ function groupedText(g, hours) {
 		: _('%d channels').format(g.channels.length);
 	if (g.kind.slice(-5) === '_lock') return _('%s not locked on %s.').format(g.channels[0].dir === 'ds' ? _('Downstream') : _('Upstream'), where);
 	return _('%s %s on %s: %s %s.').format(L.label || g.kind, LEVEL_TEXT[g.level], where, range, L.unit || '');
+}
+
+/* ------------------------------------------------------------------ CSV -- */
+
+/* One CSV field. Text that a spreadsheet would run as a formula (=, +, -,
+ * @ not followed by a number) gets a leading apostrophe. */
+function csvField(v) {
+	var s = v == null ? '' : String(v);
+	if (/^[=+\-@]/.test(s) && !/^[+-]?\d+(\.\d+)?$/.test(s)) s = "'" + s;
+	return /[",\n\r]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
+}
+
+function isoTime(ts) {
+	var d = new Date(ts * 1000);
+	return '%d-%s-%s %s:%s:%s'.format(d.getFullYear(), pad(d.getMonth() + 1), pad(d.getDate()), pad(d.getHours()), pad(d.getMinutes()), pad(d.getSeconds()));
+}
+
+var CSV_COLUMNS = {
+	readings: [ 'time', 'ts', 'result', 'reason', 'model', 'firmware', 'uptime_s', 'connectivity', 'boot', 'network_access', 'modem_time',
+		'ds_channels', 'us_channels', 'reboot', 'boot_ts', 'clock_offset_s', 'modem_ping_loss', 'modem_ping_ms', 'inet_ping_loss', 'inet_ping_ms' ],
+	channels: [ 'time', 'ts', 'dir', 'ch', 'channel_id', 'modulation', 'freq_hz', 'width_hz', 'lock', 'power_dbmv', 'snr_db', 'corrected', 'uncorrectable' ],
+	events: [ 'time', 'ts', 'modem_time', 'clock_offset_s', 'first_seen_ts', 'level', 'kind', 'message' ]
+};
+
+/* The period's readings, channels (with the line-up joined in) or events
+ * as CSV. "time" is the router's local time; channel error counts are the
+ * change since the previous good check. */
+function toCSV(D, kind) {
+	var cols = CSV_COLUMNS[kind];
+	var rows = kind === 'readings' ? D.readings : kind === 'channels' ? D.channels : D.events;
+	return [ cols.join(',') ].concat(rows.map(function(r) {
+		return cols.map(function(c) { return csvField(c === 'time' ? isoTime(+r.ts) : r[c]); }).join(',');
+	})).join('\r\n') + '\r\n';
 }
 
 /* --------------------------------------------------------------- charts -- */
@@ -308,7 +358,7 @@ function legend(items) {
 return baseclass.extend({
 	C: C, health: health,
 	callStatus: callStatus, callData: callData, callCheck: callCheck, callTest: callTest, callSetPassword: callSetPassword,
-	parseCSV: parseCSV, load: load, analyse: analyse,
+	parseCSV: parseCSV, load: load, analyse: analyse, toCSV: toCSV, csvField: csvField,
 	fmtTime: fmtTime, fmtShort: fmtShort, fmtDuration: fmtDuration, fmtNum: fmtNum, fmtInt: fmtInt, fmtLimit: fmtLimit,
 	LEVEL_TEXT: LEVEL_TEXT, reasonText: reasonText, groupReasons: groupReasons, groupedText: groupedText,
 	lineChart: lineChart, legend: legend
