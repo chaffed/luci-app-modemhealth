@@ -24,16 +24,18 @@ cp -R "$SRC/root/." "$WORK/data/"
 [ -d "$SRC/htdocs" ] && cp -R "$SRC/htdocs/." "$WORK/data/www/"
 find "$WORK/data" -type f -exec chmod 644 {} +
 find "$WORK/data" -type d -exec chmod 755 {} +
-chmod 755 "$WORK/data/usr/bin/modemhealth" "$WORK/data/etc/init.d/modemhealth" "$WORK/data/etc/uci-defaults/"*
-# The config holds the modem password: root only.
-chmod 600 "$WORK/data/etc/config/modemhealth"
+chmod 755 "$WORK/data/usr/bin/modemhealth" "$WORK/data/etc/init.d/modemhealth" "$WORK/data/etc/uci-defaults/"* \
+	"$WORK/data/usr/libexec/rpcd/luci.modemhealth"
+# Root only: the password file, and the settings (which held the password
+# before 0.1.0-r2).
+chmod 600 "$WORK/data/etc/config/modemhealth" "$WORK/data/etc/config/modemhealth_auth"
 rmdir "$WORK/data/www" 2>/dev/null || true
 
 SIZE=$(du -sk "$WORK/data" | cut -f1)
 cat > "$WORK/control/control" <<CTRL
 Package: $PKG
 Version: ${VERSION}-r${RELEASE}
-Depends: libc, curl, jsonfilter, openssl-util
+Depends: libc, luci-base, curl, jsonfilter, openssl-util
 Source: https://github.com/chaffed/luci-app-modemhealth
 SourceName: $PKG
 License: MIT
@@ -45,7 +47,7 @@ Description: Modem Health - cable modem signal, errors and outages.
  signal levels, error counts, event log, reboots and outages as evidence,
  and builds a report for the ISP.
 CTRL
-echo "/etc/config/modemhealth" > "$WORK/control/conffiles"
+printf '/etc/config/modemhealth\n/etc/config/modemhealth_auth\n' > "$WORK/control/conffiles"
 
 cat > "$WORK/control/postinst" <<'POST'
 #!/bin/sh
@@ -63,7 +65,15 @@ cat > "$WORK/control/prerm" <<'PRERM'
 /usr/bin/modemhealth logout 2>/dev/null
 exit 0
 PRERM
-chmod 755 "$WORK/control/postinst" "$WORK/control/prerm"
+cat > "$WORK/control/postrm" <<'POSTRM'
+#!/bin/sh
+[ -n "$IPKG_INSTROOT" ] && exit 0
+rm -f /tmp/luci-indexcache* 2>/dev/null
+rm -rf /tmp/luci-modulecache 2>/dev/null
+/etc/init.d/rpcd reload 2>/dev/null
+exit 0
+POSTRM
+chmod 755 "$WORK/control/postinst" "$WORK/control/prerm" "$WORK/control/postrm"
 
 # GNU tar and bsdtar spell "owned by root" differently.
 if tar --version 2>/dev/null | grep -q GNU; then

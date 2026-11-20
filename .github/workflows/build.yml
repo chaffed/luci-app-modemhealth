@@ -18,6 +18,7 @@ jobs:
       - name: Lint shell scripts
         run: |
           shellcheck luci-app-modemhealth/root/usr/bin/modemhealth \
+            luci-app-modemhealth/root/usr/libexec/rpcd/luci.modemhealth \
             luci-app-modemhealth/root/etc/init.d/modemhealth \
             luci-app-modemhealth/root/etc/uci-defaults/* \
             scripts/*.sh
@@ -34,8 +35,27 @@ jobs:
       - name: Test the health rules
         run: node tests/health.test.js
 
+      - name: Test the page logic
+        run: node tests/ui.test.js
+
+      - name: Check JSON files
+        run: |
+          for f in luci-app-modemhealth/root/usr/share/*/*/*.json; do python3 -m json.tool "$f" > /dev/null; done
+
       - name: Test the backend against the fake modem (OpenWrt 23.05 container)
         run: python3 tests/backend.test.py
+
+      - name: Test the web interface in LuCI with a browser (OpenWrt 23.05 container)
+        run: |
+          npm install --no-save playwright-core
+          node tests/luci.test.js
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: luci-screenshots
+          path: .test-out/luci/*.png
+          if-no-files-found: ignore
 
       - name: Build ipk
         run: scripts/build-ipk.sh dist

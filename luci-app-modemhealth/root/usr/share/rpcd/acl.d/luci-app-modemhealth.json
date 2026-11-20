@@ -1,0 +1,28 @@
+{
+	"luci-app-modemhealth": {
+		"description": "Grant access to Modem Health",
+		"read": {
+			"ubus": {
+				"luci.modemhealth": [
+					"status",
+					"data"
+				]
+			},
+			"uci": [
+				"modemhealth"
+			]
+		},
+		"write": {
+			"ubus": {
+				"luci.modemhealth": [
+					"check",
+					"test",
+					"set_password"
+				]
+			},
+			"uci": [
+				"modemhealth"
+			]
+		}
+	}
+}

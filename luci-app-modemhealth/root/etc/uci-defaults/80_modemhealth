@@ -1,6 +1,23 @@
 #!/bin/sh
-# The config holds the modem password: root only.
-chmod 600 /etc/config/modemhealth 2>/dev/null
+# The modem password lives in modemhealth_auth (root only), apart from the
+# settings the web pages load. Move one kept with the settings by 0.1.0-r1.
+touch /etc/config/modemhealth_auth
+chmod 600 /etc/config/modemhealth_auth /etc/config/modemhealth 2>/dev/null
+uci -q get modemhealth_auth.main >/dev/null || { uci set modemhealth_auth.main=auth; uci commit modemhealth_auth; }
+old=$(uci -q get modemhealth.main.password)
+if [ -n "$old" ]; then
+	[ -n "$(uci -q get modemhealth_auth.main.password)" ] || uci set modemhealth_auth.main.password="$old"
+	uci commit modemhealth_auth
+	uci -q delete modemhealth.main.password
+	uci commit modemhealth
+fi
+chmod 600 /etc/config/modemhealth_auth
+# Health limits changed in Settings (0.1.0-r3).
+uci -q get modemhealth.limits >/dev/null || { uci set modemhealth.limits=limits; uci commit modemhealth; }
+# The rpcd plugin and the menu entry: visible without a reboot.
+rm -f /tmp/luci-indexcache* 2>/dev/null
+rm -rf /tmp/luci-modulecache 2>/dev/null
+/etc/init.d/rpcd reload 2>/dev/null
 
 # reload_config only notices changes to configs it already has a checksum
 # for; register ours so the first "Save & Apply" restarts the scheduler.
