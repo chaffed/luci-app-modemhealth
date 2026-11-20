@@ -68,7 +68,8 @@ function channelTable(verdicts, dir) {
 			cell(mh.fmtNum(c.power_dbmv), chk.power),
 			cell(mh.fmtNum(c.snr_db), chk.snr),
 			E('td', { 'class': 'td' }, [ mh.fmtInt(c.corrected) ]),
-			E('td', { 'class': 'td' + (H.num(c.uncorrectable) > 0 ? ' mh-cell-marginal' : '') }, [ mh.fmtInt(c.uncorrectable) ])
+			/* Reported, not judged: no published threshold exists (see health.js). */
+			E('td', { 'class': 'td' }, [ mh.fmtInt(c.uncorrectable) ])
 		] : [
 			lockCell || E('td', { 'class': 'td' }, [ c.ch || '–' ]),
 			E('td', { 'class': 'td' }, [ c.channel_id ]),

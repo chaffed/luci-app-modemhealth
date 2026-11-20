@@ -254,7 +254,7 @@ function lineChart(o) {
 		svg.appendChild(S('line', { x1: ml, x2: W - mr, y1: y(v), y2: y(v), stroke: 'currentColor', 'stroke-opacity': 0.12 }));
 		svg.appendChild(S('text', { x: ml - 6, y: y(v) + 4, 'text-anchor': 'end', 'font-size': 11, fill: 'currentColor' }, [ String(v) ]));
 	});
-	var span = o.to - o.from, step = span > 3 * 86400 ? 86400 : span > 86400 ? 6 * 3600 : 3 * 3600;
+	var span = o.to - o.from, step = span > 3 * 86400 ? 86400 : span > 86400 ? 6 * 3600 : span > 8 * 3600 ? 3 * 3600 : span > 3 * 3600 ? 3600 : 1800;
 	var t0 = new Date(o.from * 1000);
 	t0.setMinutes(0, 0, 0);
 	if (step === 86400) t0.setHours(0);
