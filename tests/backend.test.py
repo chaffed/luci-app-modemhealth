@@ -47,13 +47,14 @@ def uci_quote(value):
     return "'" + value.replace("'", "'\\''") + "'"
 
 
-def config(host, password, data_dir):
+def config(host, password, data_dir, ping_host="modem"):
     return "\n".join([
         "config modemhealth 'main'",
         "\toption host %s" % uci_quote(host),
         "\toption username 'admin'",
         "\toption password %s" % uci_quote(password),
         "\toption timeout '5'",
+        "\toption ping_host %s" % uci_quote(ping_host),
         "\toption data_dir %s" % uci_quote(data_dir),
         ""])
 
@@ -207,6 +208,8 @@ def main():
             # The modem log: stored once; new entries added as it rotates.
             ("events", config(host, PASSWORD, "/out/events/data"),
              "modemhealth check >/dev/null; modemhealth check >/dev/null; " + CTL % "new_events=5"),
+            # The internet doesn't answer pings (an outage) while the modem does.
+            ("no_internet", config(host, PASSWORD, "/out/no_internet/data", ping_host="nonexistent.invalid"), ":"),
             ("daemon", config(host, PASSWORD, "/out/daemon/data"),
              "mkdir -p /var/state; touch /var/state/dnsmasqsec",
              "pgrep -f 'modemhealth daemon' > /out/daemon/left_running || true",
@@ -359,6 +362,16 @@ def main():
         offs = [int(r["clock_offset_s"]) - (modem_epoch - int(r["ts"])) for r in readings]
         check(all(o == 0 for o in offs), "events: clock offset = modem clock - router clock (container in UTC)")
         check(all(e["clock_offset_s"] != "" for e in events), "events: each event keeps the clock offset when it was first seen")
+
+        r = stored(os.path.join(out, "good"), "readings")[0]
+        check(r["modem_ping_loss"] == "0" and float(r["modem_ping_ms"]) > 0 and r["inet_ping_loss"] == "0" and float(r["inet_ping_ms"]) > 0,
+              "pings: modem and internet pinged on every check (loss and average time stored)")
+        r = stored(os.path.join(out, "unreachable"), "readings")[0]
+        check(r["result"] == "failed" and r["modem_ping_loss"] != "" and r["inet_ping_loss"] != "",
+              "pings: stored with failed readings too")
+        r = stored(os.path.join(out, "no_internet"), "readings")[0]
+        check(r["result"] == "ok" and r["inet_ping_loss"] == "100" and r["inet_ping_ms"] == "" and r["modem_ping_loss"] == "0",
+              "pings: no answer from the internet is 100%% loss with no time; the modem still answers")
 
         d = os.path.join(out, "daemon")
         state = json.load(open(os.path.join(d, "modem_state.json")))

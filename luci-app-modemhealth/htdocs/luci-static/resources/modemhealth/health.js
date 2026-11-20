@@ -330,6 +330,65 @@ function reregistrations(events) {
 	return out.map(function(r) { return { time: r.time, events: r.events }; });
 }
 
+/* ------------------------------------------------------------- outages -- */
+
+/* A check is "out" when none of the 3 pings to the internet host came back;
+ * one or two lost pings are not an outage. */
+function isOut(r) { return num(r.inet_ping_loss) === 100; }
+
+/* The modem itself didn't answer either: the fault is the modem (or its
+ * power or cable to the router), not the line beyond it. */
+function modemUnreachable(r) {
+	return num(r.modem_ping_loss) === 100 || (r.result === 'failed' && /^(unreachable|timeout)$/.test(r.reason || ''));
+}
+
+/* outages(readings, maxGapS)
+ * readings: rows of readings.csv (any order). Consecutive "out" checks are
+ * one outage, unless more than maxGapS (default 30 minutes) passed between
+ * them: then nobody knows what happened in between.
+ * -> [ {
+ *   start, end:      first and last check that found the internet down,
+ *   before, after:   the good checks around it (null if none, after = null
+ *                    while ongoing),
+ *   minS, maxS:      the outage lasted at least minS (end - start) and at
+ *                    most maxS (after - before) seconds; null if unknown,
+ *   ongoing, kind:   'modem_unreachable' if the modem stopped answering
+ *                    too at any point, otherwise 'line_down',
+ *   checks:          number of checks that found it down
+ * } ], oldest first */
+function outages(readings, maxGapS) {
+	var gap = maxGapS || 1800;
+	var rows = (readings || []).filter(function(r) { return num(r.ts) != null && r.inet_ping_loss !== '' && r.inet_ping_loss != null; })
+		.slice().sort(function(a, b) { return a.ts - b.ts; });
+	var out = [], cur = null, prevGood = null, prevTs = null;
+	rows.forEach(function(r) {
+		var ts = +r.ts;
+		if (cur && prevTs != null && ts - prevTs > gap) { close(null); }
+		if (isOut(r)) {
+			if (!cur)
+				cur = { start: ts, end: ts, before: prevGood != null && ts - prevGood <= gap ? prevGood : null,
+					after: null, kind: 'line_down', checks: 0 };
+			cur.end = ts;
+			cur.checks++;
+			if (modemUnreachable(r)) cur.kind = 'modem_unreachable';
+		} else {
+			if (cur) close(ts);
+			prevGood = ts;
+		}
+		prevTs = ts;
+	});
+	if (cur) close(null);
+	function close(after) {
+		cur.after = after;
+		cur.ongoing = after == null && cur.end === (rows.length ? +rows[rows.length - 1].ts : cur.end);
+		cur.minS = cur.end - cur.start;
+		cur.maxS = cur.before != null && after != null ? after - cur.before : null;
+		out.push(cur);
+		cur = null;
+	}
+	return out;
+}
+
 /* -------------------------------------------------------------- period -- */
 
 /* periodVerdict(input, limits)
@@ -395,6 +454,6 @@ return baseclass.extend({
 	num: num, band: band, limitsFor: limitsFor,
 	channelVerdict: channelVerdict, readingVerdict: readingVerdict,
 	classifyEvent: classifyEvent, parseModemLog: parseModemLog,
-	modemSeconds: modemSeconds, reregistrations: reregistrations,
+	modemSeconds: modemSeconds, reregistrations: reregistrations, outages: outages,
 	periodVerdict: periodVerdict
 });
