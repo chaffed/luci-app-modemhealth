@@ -224,6 +224,17 @@ def main():
              "MH_PASSWORD=$(cat /out/pw) modemhealth test"),
             ("web_test_bad", config(host, "", "/out/web_test_bad/data"), ":", ":",
              "MH_PASSWORD=wrong modemhealth test"),
+            # The same from the GL.iNet panel, which can only pass arguments:
+            # what is typed goes into a root-only file the backend made.
+            ("web_test_file", config("192.0.2.1", "", "/out/web_test_file/data"),
+             "f=$(modemhealth test-input); ls -ld /var/run/modemhealth \"$f\" > /out/web_test_file/ls; "
+             "{ echo modem:%d; echo admin; cat /out/pw; } > \"$f\"; echo \"$f\" > /out/web_test_file/name" % PORT,
+             "ls /var/run/modemhealth/ > /out/web_test_file/after; "
+             "modemhealth test /etc/passwd > /out/web_test_file/other.txt; "
+             "modemhealth test /var/run/modemhealth/test-input.x/../../../etc/passwd >> /out/web_test_file/other.txt; "
+             "modemhealth test test-input.x >> /out/web_test_file/other.txt; "
+             "grep -c root /etc/passwd > /out/web_test_file/passwd",
+             "modemhealth test \"$f\""),
             # A new password saved from the web page goes to modemhealth_auth;
             # one kept with the settings by an older version is removed.
             ("set_password", config(host, "old-password", "/out/set_password/data"), ":",
@@ -419,6 +430,18 @@ def main():
         check(json.load(open(os.path.join(d, "modem_state.json")))["logouts"] == 1, "web test: logs out afterwards")
         res = json.loads(open(os.path.join(out, "web_test_bad", "output.txt")).read())
         check(res == {"ok": False, "reason": "login_refused"}, "web test: a wrong password is reported as refused")
+
+        d = os.path.join(out, "web_test_file")
+        res = json.loads(open(os.path.join(d, "output.txt")).read())
+        check(res.get("ok") is True and res.get("model") == "S34",
+              "web test from a file: address, user name and password are read from it (%s)" % res)
+        ls = open(os.path.join(d, "ls")).read().split("\n")
+        check(ls[0].startswith("drwx------ ") and ls[1].startswith("-rw------- ") and "/var/run/modemhealth/test-input." in ls[1],
+              "web test from a file: the file is root only, in a root-only folder")
+        check("test-input" not in open(os.path.join(d, "after")).read(), "web test from a file: the file is removed once read")
+        other = [json.loads(l) for l in open(os.path.join(d, "other.txt")).read().split("\n") if l]
+        check(other == [{"ok": False, "reason": "bad_input"}] * 3 and open(os.path.join(d, "passwd")).read().strip() != "0",
+              "web test from a file: any other file is refused and left alone")
 
         d = os.path.join(out, "set_password")
         check(json.loads(open(os.path.join(d, "output.txt")).read()) == {"ok": True}, "set password: done")

@@ -71,6 +71,10 @@ cat > "$WORK/control/postrm" <<'POSTRM'
 rm -f /tmp/luci-indexcache* 2>/dev/null
 rm -rf /tmp/luci-modulecache 2>/dev/null
 /etc/init.d/rpcd reload 2>/dev/null
+# GL.iNet admin panel: drop Modem Health's panel module from memory.
+if [ -d /usr/lib/oui-httpd/rpc ] && [ -s /var/run/nginx.pid ] && [ -x /usr/sbin/nginx ]; then
+	/usr/sbin/nginx -s reload 2>/dev/null
+fi
 exit 0
 POSTRM
 chmod 755 "$WORK/control/postinst" "$WORK/control/prerm" "$WORK/control/postrm"

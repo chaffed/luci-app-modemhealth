@@ -29,7 +29,7 @@ jobs:
       - name: Check JavaScript syntax
         run: |
           for f in $(find luci-app-modemhealth/htdocs -name '*.js'); do
-            node -e "new Function(require('fs').readFileSync('$f', 'utf8'))"
+            node -e "new Function('module', require('fs').readFileSync('$f', 'utf8'))"
           done
 
       - name: Test the health rules
@@ -37,6 +37,15 @@ jobs:
 
       - name: Test the page logic
         run: node tests/ui.test.js
+
+      - name: Check that every setting is in both forms and the panel's module
+        run: node tests/settings.test.js
+
+      - name: Test the GL.iNet admin panel module
+        run: |
+          sudo apt-get install -y -qq lua5.1 lua-cjson >/dev/null
+          luac5.1 -p luci-app-modemhealth/root/usr/lib/oui-httpd/rpc/modemhealth luci-app-modemhealth/root/usr/share/gl-validator.d/modemhealth.lua tests/gl/rpc.lua
+          lua5.1 tests/gl_rpc.test.lua
 
       - name: Check JSON files
         run: |
@@ -50,11 +59,16 @@ jobs:
           npm install --no-save playwright-core
           node tests/luci.test.js
 
+      - name: Test the GL.iNet admin panel pages with a browser (stand-in panel, real module)
+        run: node tests/gl.test.js
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: luci-screenshots
-          path: .test-out/luci/*.png
+          name: screenshots
+          path: |
+            .test-out/luci/*.png
+            .test-out/gl/*.png
           if-no-files-found: ignore
 
       - name: Build ipk

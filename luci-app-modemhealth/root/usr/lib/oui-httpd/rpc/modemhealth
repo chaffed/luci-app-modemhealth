@@ -1,0 +1,308 @@
+--[[
+    @object-name: modemhealth
+    @object-desc: Modem Health (luci-app-modemhealth) for the GL.iNet admin panel.
+
+    The panel only lets a logged-in administrator call these methods. They
+    run /usr/bin/modemhealth without a shell (arguments are passed as a
+    list) and read or write the "modemhealth" UCI settings. Every value is
+    checked here before it is used or stored.
+
+    The modem password goes in (set_password, test) and never comes out. The
+    panel's web server can give a command only arguments, which every
+    process on the router can read, so the password never travels that way:
+    set_password writes it straight to the root-only UCI file, and test
+    writes what was typed into a root-only file the backend made for it.
+
+    The panel writes every call to the system log unless the method's name
+    contains "get", "load" or "check"; hence get_status and get_data, which
+    the Overview calls many times.
+
+    SPDX-License-Identifier: MIT
+--]]
+
+local cjson = require "cjson"
+local uci = require "uci"
+
+local M = {}
+
+local BIN = "/usr/bin/modemhealth"
+local AUTH = "/etc/config/modemhealth_auth"
+
+-- Run a command given as a list and return what it printed.
+-- The panel's web server provides its own ngx.pipe (it hands the command to
+-- gl-ngx-session), which only knows spawn(args, opts), stdout_read_all()
+-- and wait(); the options below mean the same to OpenResty's ngx.pipe.
+local function spawn(cmd, seconds)
+    local ms = (seconds or 30) * 1000
+    local proc = ngx.pipe.spawn(cmd, { stdout_read_timeout = ms, wait_timeout = ms })
+    if not proc then return "" end
+    local out = proc:stdout_read_all()
+    proc:wait()
+    return out or ""
+end
+
+local function run(args, seconds)
+    local cmd = { BIN }
+    for _, a in ipairs(args) do cmd[#cmd + 1] = a end
+    return spawn(cmd, seconds)
+end
+
+local function run_json(args, seconds)
+    local ok, res = pcall(cjson.decode, run(args, seconds))
+    if ok and type(res) == "table" then return res end
+    return { err_code = -1, err_msg = "Modem Health did not answer" }
+end
+
+-- Whole number within [lo, hi], else the default.
+local function int_arg(v, lo, hi, default)
+    v = tonumber(v)
+    if not v or v ~= v then return default end
+    v = math.floor(v)
+    if v < lo then return lo end
+    if v > hi then return hi end
+    return v
+end
+
+-- "%.0f", not "%d": the panel's Lua may use 32-bit integers.
+local function whole(n) return string.format("%.0f", n) end
+
+--[[
+    @method-name: get_status
+    @method-desc: Scheduler state, the latest reading and the modem's identity. Says whether a password is saved, never what it is.
+    @in-example:  {"jsonrpc":"2.0","method":"call","params":["","modemhealth","get_status",{}],"id":1}
+--]]
+M.get_status = function()
+    return run_json({ "status" })
+end
+
+--[[
+    @method-name: get_data
+    @method-desc: Stored readings, channels and events of a period, as CSV text.
+    @in number since  Unix time; rows from then on.
+    @in number until  Unix time; rows up to then (default: now).
+--]]
+M.get_data = function(params)
+    params = params or {}
+    local args = { "data", whole(int_arg(params.since, 0, 4294967295, 0)) }
+    if params["until"] ~= nil then
+        args[#args + 1] = whole(int_arg(params["until"], 0, 4294967295, 4294967295))
+    end
+    return run_json(args, 60)
+end
+
+--[[
+    @method-name: check
+    @method-desc: Read the modem now, store the reading and return the new status.
+--]]
+M.check = function()
+    run({ "check" }, 90)
+    return run_json({ "status" })
+end
+
+-- ------------------------------------------------------------- settings --
+
+local function is_uint(v) return v:match("^%d+$") ~= nil and #v <= 10 end
+local function is_number(v) return v:match("^%-?%d+%.?%d*$") ~= nil and #v <= 12 end
+
+local function range(lo, hi)
+    return function(v)
+        return is_uint(v) and tonumber(v) >= lo and tonumber(v) <= hi
+    end
+end
+
+-- One line of printable text.
+local function text(max)
+    return function(v) return #v <= max and not v:find("[%z\1-\31\127]") end
+end
+
+-- A host name or address, with or without a port.
+local function host(v)
+    return v:match("^[%w%.:_%-%[%]]+$") ~= nil and v:sub(1, 1) ~= "-" and #v <= 253
+end
+
+local function host_only(v)
+    return v:match("^[%w%.:_%-]+$") ~= nil and v:sub(1, 1) ~= "-" and #v <= 253
+end
+
+local password_ok = text(128)
+
+-- Every setting the panel may change, with the check its value must pass.
+-- "optional" settings are removed when left empty (the default applies).
+local FIELDS = {
+    enabled = { check = function(v) return v == "0" or v == "1" end },
+    interval = { check = range(1, 60) },
+    host = { check = host },
+    username = { check = text(64) },
+    ping_host = { optional = true, check = host_only },
+    history_days = { optional = true, check = range(1, 730) },
+}
+
+-- The health limits (health.js: limitList), each with up to four bounds,
+-- stored in the "limits" section. Empty = Modem Health's default.
+local LIMIT_KEYS = {
+    "ds_power", "ds_snr", "ds_snr_low_power", "ds_power_ofdm", "ds_mer_ofdm",
+    "us_power_1", "us_power_2", "us_power_3", "us_power_4", "us_power_ofdma",
+    "outages_per_day", "t4_per_day", "t3_per_day", "sync_loss_per_day", "reboots_per_day",
+    "share_readings_failing", "share_readings_degraded",
+}
+local BOUNDS = { "good_min", "good_max", "acceptable_min", "acceptable_max" }
+local LIMITS = {}
+for _, key in ipairs(LIMIT_KEYS) do
+    for _, bound in ipairs(BOUNDS) do
+        LIMITS[key .. "_" .. bound] = { optional = true, check = is_number }
+    end
+end
+
+M.FIELDS = FIELDS
+M.LIMITS = LIMITS
+
+--[[
+    @method-name: get_config
+    @method-desc: Current settings and changed health limits. The password is not among them.
+    @out object config
+    @out object limits
+--]]
+M.get_config = function()
+    local c = uci.cursor()
+    local config, limits = {}, {}
+    for key in pairs(FIELDS) do
+        local v = c:get("modemhealth", "main", key)
+        if type(v) == "string" then config[key] = v end
+    end
+    for key in pairs(LIMITS) do
+        local v = c:get("modemhealth", "limits", key)
+        if type(v) == "string" then limits[key] = v end
+    end
+    -- cjson writes an empty table as an array; the page copes with both.
+    return { config = config, limits = limits }
+end
+
+--[[
+    @method-name: set_config
+    @method-desc: Check and store settings and health limits. Nothing is stored unless every value is valid.
+    @in object values  setting -> value (strings, numbers or booleans)
+    @out bool saved
+--]]
+M.set_config = function(params)
+    local values = type(params) == "table" and params.values
+    if type(values) ~= "table" then
+        return { err_code = -1, err_msg = "no settings were sent" }
+    end
+
+    local changes = {}
+    for key, v in pairs(values) do
+        local section = "main"
+        local field = type(key) == "string" and FIELDS[key]
+        if not field and type(key) == "string" and LIMITS[key] then
+            field, section = LIMITS[key], "limits"
+        end
+        if not field then
+            return { err_code = -1, err_msg = "unknown setting", field = tostring(key) }
+        end
+        if type(v) == "boolean" then
+            v = v and "1" or "0"
+        elseif type(v) == "number" then
+            v = (v == math.floor(v)) and whole(v) or tostring(v)
+        elseif type(v) ~= "string" then
+            return { err_code = -1, err_msg = "invalid value", field = key }
+        end
+        v = v:match("^%s*(.-)%s*$")
+        if v == "" then
+            if not field.optional then
+                return { err_code = -1, err_msg = "this setting cannot be empty", field = key }
+            end
+            changes[#changes + 1] = { section, key, false }
+        elseif not field.check(v) then
+            return { err_code = -1, err_msg = "invalid value", field = key }
+        else
+            changes[#changes + 1] = { section, key, v }
+        end
+    end
+
+    local c = uci.cursor()
+    if not c:get("modemhealth", "main") then c:set("modemhealth", "main", "modemhealth") end
+    if not c:get("modemhealth", "limits") then c:set("modemhealth", "limits", "limits") end
+    for _, ch in ipairs(changes) do
+        if ch[3] == false then
+            c:delete("modemhealth", ch[1], ch[2])
+        else
+            c:set("modemhealth", ch[1], ch[2], ch[3])
+        end
+    end
+    c:commit("modemhealth")
+    -- The scheduler reads its settings again at least once a minute, so it
+    -- is not restarted here.
+    return { saved = true }
+end
+
+--[[
+    @method-name: set_password
+    @method-desc: Store the modem password (root-only file). It cannot be read back.
+    @in string password
+    @out bool ok
+--]]
+M.set_password = function(params)
+    local pw = type(params) == "table" and params.password
+    if type(pw) ~= "string" or pw == "" then
+        return { err_code = -1, err_msg = "no password was sent", field = "password" }
+    end
+    if not password_ok(pw) then
+        return { err_code = -1, err_msg = "invalid value", field = "password" }
+    end
+
+    -- The file must exist for UCI and be root only before the password
+    -- goes into it (UCI keeps a file's mode when it rewrites it).
+    local f = io.open(AUTH, "a")
+    if f then f:close() end
+    spawn({ "/bin/chmod", "600", AUTH }, 10)
+
+    local c = uci.cursor()
+    if not c:get("modemhealth_auth", "main") then c:set("modemhealth_auth", "main", "auth") end
+    c:set("modemhealth_auth", "main", "password", pw)
+    c:commit("modemhealth_auth")
+    -- Remove a password kept with the other settings by older versions.
+    if c:get("modemhealth", "main", "password") then
+        c:delete("modemhealth", "main", "password")
+        c:commit("modemhealth")
+    end
+    -- The backend starts a new modem session by itself: the settings are
+    -- now newer than the session it kept.
+    return { ok = true }
+end
+
+--[[
+    @method-name: test
+    @method-desc: Log in to the modem with what is typed (before it is saved) and say what answered. Stores nothing.
+    @in string host      Modem address (empty: the saved one).
+    @in string username  User name (empty: the saved one).
+    @in string password  Password (empty: the saved one).
+    @out bool ok
+    @out string reason   Why not, when ok is false.
+--]]
+M.test = function(params)
+    params = type(params) == "table" and params or {}
+    local h, u, p = params.host or "", params.username or "", params.password or ""
+    if type(h) ~= "string" or (h ~= "" and not host(h)) then
+        return { ok = false, reason = "invalid_input", field = "host" }
+    end
+    if type(u) ~= "string" or not FIELDS.username.check(u) then
+        return { ok = false, reason = "invalid_input", field = "username" }
+    end
+    if type(p) ~= "string" or not password_ok(p) then
+        return { ok = false, reason = "invalid_input", field = "password" }
+    end
+
+    local path = run({ "test-input" }, 10):match("^(/var/run/modemhealth/test%-input%.%w+)%s*$")
+    if not path then return { ok = false, reason = "no_input_file" } end
+    -- The backend made this file root only; writing to it keeps that.
+    local f = io.open(path, "w")
+    if not f then return { ok = false, reason = "no_input_file" } end
+    f:write(h, "\n", u, "\n", p, "\n")
+    f:close()
+
+    local res = run_json({ "test", path }, 90)
+    if res.err_code then return { ok = false, reason = "no_answer" } end
+    return res
+end
+
+return M

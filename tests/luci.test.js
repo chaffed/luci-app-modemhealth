@@ -6,106 +6,27 @@
  * modem, logs in as root and uses the Settings and Overview pages the way
  * their owner would. Screenshots are left in .test-out/luci/.
  *
- * Needs docker, python3, Google Chrome and playwright-core:
- *   npm install --no-save playwright-core
- *   node tests/luci.test.js
- * MH_CHROME=/path/to/chrome picks another Chromium-based browser;
- * MH_KEEP=1 leaves the container running (http://127.0.0.1:18480, root /
- * luci-test) to look at the pages by hand.
+ * Run: node tests/luci.test.js (what it needs: see tests/webrig.js).
  */
-var fs = require('fs'), path = require('path'), cp = require('child_process'), http = require('http');
-var gen = require('./gen.js');
+var fs = require('fs'), path = require('path');
+var rig = require('./webrig.js');
+var gen = rig.gen, ok = rig.ok, eq = rig.eq, sleep = rig.sleep, router = rig.router, modemControl = rig.modemControl;
 
-var ROOT = path.join(__dirname, '..');
-var IMAGE = 'modemhealth-test-luci', NAME = 'modemhealth-test-luci';
-var MODEM_PORT = 18443, LUCI_PORT = 18480, LUCI = 'http://127.0.0.1:' + LUCI_PORT;
-var ROOT_PW = 'luci-test';
-/* Characters that break naive quoting in shell, JSON, UCI and HTML. */
-var PASSWORD = 'Pa ss,w"o\'r$d\\`1<b>';
+var ROOT = rig.ROOT, MODEM_PORT = rig.MODEM_PORT, LUCI = rig.WEB, ROOT_PW = rig.ROOT_PW, PASSWORD = rig.PASSWORD;
 var SHOTS = path.join(ROOT, '.test-out', 'luci');
-
-var playwright;
-try { playwright = require(process.env.PLAYWRIGHT_CORE || 'playwright-core'); }
-catch (e) {
-	console.error('playwright-core is not installed. Run: npm install --no-save playwright-core');
-	process.exit(2);
-}
-
-var fail = 0;
-function ok(cond, name) { if (!cond) fail++; console.log((cond ? 'ok   ' : 'FAIL ') + name); return cond; }
-function eq(got, want, name) {
-	var g = JSON.stringify(got), w = JSON.stringify(want);
-	return ok(g === w, name + (g === w ? '' : ' (got ' + g + ', expected ' + w + ')'));
-}
-function sleep(ms) { return new Promise(function(r) { setTimeout(r, ms); }); }
-function docker(args, input) {
-	return cp.execFileSync('docker', args, { input: input, encoding: 'utf8', stdio: [ 'pipe', 'pipe', 'pipe' ] });
-}
-function router(script) { return docker([ 'exec', '-i', NAME, 'sh', '-s' ], script); }
-function get(url) {
-	return new Promise(function(resolve, reject) {
-		http.get(url, function(res) { res.resume(); resolve(res.statusCode); }).on('error', reject);
-	});
-}
-function modemControl(what) {
-	return JSON.parse(cp.execFileSync('curl', [ '-sk', 'https://127.0.0.1:' + MODEM_PORT + '/_control/' + what ], { encoding: 'utf8' }));
-}
 
 async function main() {
 	fs.mkdirSync(SHOTS, { recursive: true });
-	var out = fs.mkdtempSync(path.join(ROOT, '.test-out', 'luci-run-'));
-	var modem, browser;
+	var r = await rig.start();
 	try {
-		docker([ 'build', '-q', '--platform', 'linux/amd64', '-t', IMAGE, path.join(ROOT, 'tests', 'openwrt-luci') ]);
-		modem = cp.spawn('python3', [ path.join(ROOT, 'tests', 'fake_modem.py'), '--port', String(MODEM_PORT), '--password', PASSWORD ], { stdio: 'ignore' });
-		try { docker([ 'rm', '-f', NAME ]); } catch (e) { /* not running */ }
-		docker([ 'run', '-d', '--platform', 'linux/amd64', '--name', NAME, '-p', '127.0.0.1:' + LUCI_PORT + ':80',
-			'--add-host', 'modem:host-gateway', '-v', path.join(ROOT, 'luci-app-modemhealth') + ':/pkg:ro', '-v', out + ':/out', IMAGE, '/sbin/init' ]);
-
-		var now = Math.floor(Date.now() / 1000);
-		var made = gen.make(now, 3, { hostile: true });
-		gen.write(path.join(out, 'seed'), made);
-
-		for (var i = 0; i < 100; i++) {
-			try { if (await get(LUCI + '/cgi-bin/luci/')) break; } catch (e) { /* not up yet */ }
-			await sleep(300);
-		}
-		router([
-			'set -e',
-			'cp -R /pkg/root/. /',
-			'cp -R /pkg/htdocs/. /www/',
-			'chmod 755 /usr/bin/modemhealth /usr/libexec/rpcd/luci.modemhealth /etc/init.d/modemhealth',
-			'chmod 600 /etc/config/modemhealth /etc/config/modemhealth_auth',
-			'uci set modemhealth.main.enabled=0',
-			'uci set modemhealth.main.ping_host=modem',
-			'uci set modemhealth.main.timeout=5',
-			'uci commit modemhealth',
-			'mkdir -p /etc/modemhealth && cp -R /out/seed/. /etc/modemhealth/',
-			/* What the ntp hotplug leaves once the clock is set: without it
-			 * the scheduler waits until the machine has been up ten minutes. */
-			'mkdir -p /var/state && touch /var/state/dnsmasqsec',
-			'sh /etc/uci-defaults/80_modemhealth',
-			'printf "%s\\n%s\\n" ' + ROOT_PW + ' ' + ROOT_PW + ' | passwd root >/dev/null 2>&1'
-		].join('\n'));
-		modemControl('reset');
-
-		browser = await playwright.chromium.launch(process.env.MH_CHROME ? { executablePath: process.env.MH_CHROME } : { channel: 'chrome' });
-		var ctx = await browser.newContext({ viewport: { width: 1280, height: 900 }, acceptDownloads: true });
-		var page = await ctx.newPage();
-		var problems = [], replies = [];
-		page.on('response', function(res) {
-			if (!/\/(cgi-bin|ubus)/.test(res.url())) return;
-			replies.push(res.text().then(function(t) { return res.url() + '\n' + t; }, function() { return ''; }));
-		});
+		var page = r.page, problems = r.problems, replies = r.replies, made = r.made, now = r.now, out = r.out, i;
 
 		/* ------------------------------------------------------------- log in */
 		await page.goto(LUCI + '/cgi-bin/luci/admin/services/modemhealth/settings');
 		await page.fill('input[name=luci_username]', 'root');
 		await page.fill('input[name=luci_password]', ROOT_PW);
 		await Promise.all([ page.waitForNavigation(), page.press('input[name=luci_password]', 'Enter') ]);
-		/* From here on (the login page itself answers 403). */
-		page.on('pageerror', function(e) { problems.push('page error: ' + e.message); });
-		page.on('console', function(m) { if (m.type() === 'error') problems.push('console: ' + m.text()); });
+		r.watch();
 
 		var field = function(name, section) { return '[id="widget.cbid.modemhealth.' + (section || 'main') + '.' + name + '"]'; };
 		var openSettings = async function() {
@@ -168,40 +89,12 @@ async function main() {
 			await page.goto(LUCI + '/cgi-bin/luci/admin/services/modemhealth/overview');
 			await page.waitForSelector('svg.mh-chart', { timeout: 60000 });
 		};
-		var summary = function() {
-			return page.evaluate(function() {
-				var sec = function(title) {
-					return Array.prototype.filter.call(document.querySelectorAll('#view h3'), function(h) { return h.textContent === title; })[0].parentNode;
-				};
-				var charts = document.querySelectorAll('svg.mh-chart'), power = charts[0];
-				return {
-					badges: Array.prototype.map.call(document.querySelectorAll('.mh-summary .mh-badge'), function(b) { return b.textContent; }),
-					counts: (/(\d+) checks, (\d+) failed/.exec(document.querySelector('.mh-summary').textContent) || []).slice(1).map(Number),
-					ds: sec('Downstream channels').querySelectorAll('tr.tr:not(.table-titles)').length,
-					us: sec('Upstream channels').querySelectorAll('tr.tr:not(.table-titles)').length,
-					marked: document.querySelectorAll('td.mh-cell-marginal, td.mh-cell-bad').length,
-					outages: sec('Outages').querySelectorAll('li').length,
-					restarts: sec('Restarts and re-registrations').textContent,
-					charts: charts.length,
-					segments: (power.querySelector('path').getAttribute('d').match(/M/g) || []).length,
-					dots: power.querySelectorAll('circle').length,
-					outageSpans: Array.prototype.filter.call(power.querySelectorAll('rect title'), function(t) { return /^Outage/.test(t.textContent); }).length,
-					restartMarks: Array.prototype.filter.call(power.querySelectorAll('line title'), function(t) { return t.textContent === 'Modem restarted'; }).length,
-					notice: (document.querySelector('.alert-message.notice') || {}).textContent || '',
-					text: document.getElementById('view').innerText,
-					xss: [ window.__xss, document.querySelectorAll('#view img, #view script, #view b[onmouseover]').length ]
-				};
-			});
-		};
+		var summary = function() { return page.evaluate(rig.overviewSummary); };
 		await openOverview();
 		var s = await summary();
 		await page.screenshot({ path: path.join(SHOTS, 'overview-24h.png'), fullPage: true });
 		var inDay = function(ts) { return ts >= now - 86400; };
-		var lines = function(kind) {
-			return Object.keys(made.files).filter(function(n) { return n.indexOf(kind + '/') === 0; })
-				.map(function(n) { return made.files[n].split('\n').slice(1).filter(Boolean); })
-				.reduce(function(a, b) { return a.concat(b); }, []);
-		};
+		var lines = function(kind) { return rig.lines(made, kind); };
 		var dayReadings = lines('readings').filter(function(l) { return inDay(+l.split(',')[0]); });
 		ok(Math.abs(s.counts[0] - dayReadings.length) <= 1 && s.counts[1] === 4,
 			'overview: the last 24 hours hold %d checks, 4 failed (page: %s)'.replace('%d', dayReadings.length).replace('%s', s.counts.join(', ')));
@@ -272,8 +165,14 @@ async function main() {
 
 		/* ---------------------------------------------------------- Check now */
 		var before = modemControl('state');
-		await Promise.all([ page.waitForNavigation({ timeout: 90000 }), page.click('button:has-text("Check now")') ]);
-		await page.waitForSelector('svg.mh-chart', { timeout: 60000 });
+		var lastCheck = function() { return (/Last check: [^.]*/.exec(document.querySelector('.mh-summary').textContent) || [ '' ])[0]; };
+		var shown = await page.evaluate(lastCheck);
+		await page.click('button:has-text("Check now")');
+		/* The page redraws itself with the new reading; it does not reload. */
+		await page.waitForFunction(function(old) {
+			var m = /Last check: [^.]*/.exec((document.querySelector('.mh-summary') || {}).textContent || '');
+			return m && m[0] !== old;
+		}, shown, { timeout: 90000 });
 		var last = router('modemhealth last').trim().split(','), after = modemControl('state');
 		ok(last[1] === 'ok' && Math.abs(+last[0] - Date.now() / 1000) < 120 && last[3] === 'S34', 'check now: a new good reading from the modem is stored');
 		eq([ after.status_reads - before.status_reads, after.bad_signatures, after.login_failures ], [ 1, 0, 1 ],
@@ -313,16 +212,8 @@ async function main() {
 			'secrecy: nor in the stored files or the system log');
 		eq(problems, [], 'no script errors on any page');
 	} finally {
-		if (browser) await browser.close();
-		if (modem) modem.kill();
-		if (process.env.MH_KEEP) console.log('container left running: ' + LUCI + '/cgi-bin/luci (root / ' + ROOT_PW + '); remove with: docker rm -f ' + NAME);
-		else { try { docker([ 'rm', '-f', NAME ]); } catch (e) { /* gone */ } }
-		fs.rmSync(out, { recursive: true, force: true });
+		await r.stop();
 	}
 }
 
-main().catch(function(e) { fail++; console.log('FAIL ' + (e.stack || e)); }).then(function() {
-	console.log(fail ? '\n' + fail + ' check(s) failed' : '\nall checks passed');
-	console.log('screenshots: ' + SHOTS);
-	process.exit(fail ? 1 : 0);
-});
+main().catch(rig.failed).then(function() { rig.finish(SHOTS); });

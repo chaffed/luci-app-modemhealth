@@ -637,12 +637,35 @@ do_status() {
 	echo '}}'
 }
 
-# Log in with the settings in the environment (the Settings page sends what
-# is typed, before it is saved) and read the status once, without storing
-# anything or touching the kept session.
-do_test() {
-	local ds us
+# The GL.iNet panel's web server can give a command neither input nor
+# environment, only arguments, which every process on the router can read.
+# For a test with a typed password it therefore asks for a root-only file
+# (test-input), writes the address, user name and password into it (one per
+# line) and gives its name to "test", which reads and removes it.
+do_test_input() {
 	load_config
+	mkdir -p "$RUN_DIR" && chmod 700 "$RUN_DIR" || return 1
+	rm -f "$RUN_DIR"/test-input.*   # left by a test that never ran
+	mktemp "$RUN_DIR/test-input.XXXXXX"
+}
+
+# Log in with the settings in the environment, or in the file from
+# test-input (the Settings page sends what is typed, before it is saved),
+# and read the status once, without storing anything or touching the kept
+# session.
+do_test() { # $1=file from test-input (optional)
+	local ds us input=$1
+	load_config
+	if [ -n "$input" ]; then
+		case ${input#"$RUN_DIR"/} in
+			test-input.*/*|"$input") input= ;;
+			test-input.*) [ -f "$input" ] || input= ;;
+			*) input= ;;
+		esac
+		[ -n "$input" ] || { echo '{"ok":false,"reason":"bad_input"}'; return 1; }
+		{ IFS= read -r MH_HOST; IFS= read -r MH_USER; IFS= read -r MH_PASSWORD; } < "$input"
+		rm -f "$input"
+	fi
 	HOST=${MH_HOST:-$HOST}; USERNAME=${MH_USER:-$USERNAME}
 	[ -n "$MH_PASSWORD" ] && PASSWORD=$MH_PASSWORD
 	BASE="https://$HOST"
@@ -696,10 +719,11 @@ case "$1" in
 	daemon) do_daemon ;;
 	status) do_status ;;
 	data) do_data "$2" "$3" ;;
-	test) do_test ;;
+	test) do_test "$2" ;;
+	test-input) do_test_input ;;
 	set-password) do_set_password ;;
 	*)
-		echo "usage: modemhealth check|history [N]|last|logout|daemon|status|data SINCE [UNTIL]|test|set-password" >&2
+		echo "usage: modemhealth check|history [N]|last|logout|daemon|status|data SINCE [UNTIL]|test [FILE]|test-input|set-password" >&2
 		exit 2
 		;;
 esac
