@@ -81,6 +81,9 @@ async function main() {
 			'uci set modemhealth.main.timeout=5',
 			'uci commit modemhealth',
 			'mkdir -p /etc/modemhealth && cp -R /out/seed/. /etc/modemhealth/',
+			/* What the ntp hotplug leaves once the clock is set: without it
+			 * the scheduler waits until the machine has been up ten minutes. */
+			'mkdir -p /var/state && touch /var/state/dnsmasqsec',
 			'sh /etc/uci-defaults/80_modemhealth',
 			'printf "%s\\n%s\\n" ' + ROOT_PW + ' ' + ROOT_PW + ' | passwd root >/dev/null 2>&1'
 		].join('\n'));
