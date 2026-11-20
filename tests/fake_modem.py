@@ -16,6 +16,8 @@ Control endpoints (plain GET on the same port) for tests:
                                 last_ts=N       latest timestamp already accepted
                                 counter_add=N   add N to every downstream error counter
                                 uptime=N        report N seconds of uptime
+                                new_events=N    N new log entries (loss of sync), the
+                                                oldest dropped so the log keeps 100
                                 restart=1       the modem restarted: counters start
                                                 again from counter_add, uptime from
                                                 the uptime setting (default 60)
@@ -80,6 +82,7 @@ class Modem:
         self.counter_add = 0
         self.counter_base = True   # False after a restart: counters start from 0
         self.uptime = None
+        self.new_events = 0
         self.counts = {"requests": 0, "logins": 0, "login_failures": 0,
                        "bad_signatures": 0, "status_reads": 0, "logouts": 0,
                        "unauthorised": 0, "stale_timestamps": 0}
@@ -97,6 +100,11 @@ class Modem:
                     f[8] = str(base(f[8]) + self.counter_add)
                 rows.append("^".join(f))
             reply["CustomerConnDownstreamChannel"] = "|+|".join(rows)
+        if action == "GetCustomerStatusLog" and self.new_events:
+            entries = reply["CustomerStatusLogList"].split("}-{")
+            added = ["0^11/19/2026 15:%02d:%02d^^Critical^SYNC Timing Synchronization failure - Loss of Sync" % (i // 60, i % 60)
+                     for i in range(self.new_events, 0, -1)]
+            reply["CustomerStatusLogList"] = "}-{".join((added + entries)[:100])
         if action == "GetCustomerStatusSoftware" and self.uptime is not None:
             u = self.uptime
             reply["CustomerConnSystemUpTime"] = "%d day(s) %02dh:%02dm:%02ds" % (u // 86400, u % 86400 // 3600, u % 3600 // 60, u % 60)
@@ -154,6 +162,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         m.counter_add = int(value)
                     elif key == "uptime":
                         m.uptime = int(value)
+                    elif key == "new_events":
+                        m.new_events += int(value)
                     elif key == "restart":
                         m.counter_base = False
                         if m.uptime is None:

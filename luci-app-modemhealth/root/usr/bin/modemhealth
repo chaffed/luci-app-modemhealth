@@ -16,9 +16,10 @@
 
 CONFIG=modemhealth
 HNAP_NS='http://purenetworks.com/HNAP1/'
-STATUS_ACTIONS='GetCustomerStatusStartupSequence GetCustomerStatusConnectionInfo GetCustomerStatusDownstreamChannelInfo GetCustomerStatusUpstreamChannelInfo GetCustomerStatusSoftware'
+STATUS_ACTIONS='GetCustomerStatusStartupSequence GetCustomerStatusConnectionInfo GetCustomerStatusDownstreamChannelInfo GetCustomerStatusUpstreamChannelInfo GetCustomerStatusSoftware GetCustomerStatusLog'
 # Stored per day, in DATA_DIR/readings/ and DATA_DIR/channels/ (see storage).
-READINGS_HEADER='ts,result,reason,model,firmware,uptime_s,connectivity,boot,network_access,modem_time,ds_channels,us_channels,reboot,boot_ts'
+READINGS_HEADER='ts,result,reason,model,firmware,uptime_s,connectivity,boot,network_access,modem_time,ds_channels,us_channels,reboot,boot_ts,clock_offset_s'
+EVENTS_HEADER='first_seen_ts,modem_time,clock_offset_s,level,message'
 CHANNELS_HEADER='ts,dir,channel_id,lock,power_dbmv,snr_db,corrected,uncorrectable'
 CHANNELMAP_HEADER='ts,dir,ch,channel_id,modulation,freq_hz,width_hz'
 
@@ -238,6 +239,9 @@ channel_rows() {
 #   channels/YYYY-MM-DD.csv   one row per channel per good check: power,
 #                             SNR/MER, and the corrected and uncorrectable
 #                             errors since the previous good check
+#   events/YYYY-MM-DD.csv     the modem's event log entries, each stored once,
+#                             by the day it was first seen
+#   events.seen               the entries of the previous log read
 #   channelmap.csv            the channel line-up (modulation, frequency,
 #                             width), written only when it changes
 #   modem.txt                 model, firmware, MAC: what the ISP needs
@@ -248,24 +252,26 @@ channel_rows() {
 today() { date +%Y-%m-%d; }
 
 ensure_store() {
-	mkdir -p "$DATA_DIR/readings" "$DATA_DIR/channels" || return 1
+	mkdir -p "$DATA_DIR/readings" "$DATA_DIR/channels" "$DATA_DIR/events" || return 1
 	DAY=$(today)
 	READINGS="$DATA_DIR/readings/$DAY.csv"
 	CHANNELS="$DATA_DIR/channels/$DAY.csv"
 	[ -s "$READINGS" ] || echo "$READINGS_HEADER" > "$READINGS"
 	[ -s "$CHANNELS" ] || echo "$CHANNELS_HEADER" > "$CHANNELS"
+	EVENTS="$DATA_DIR/events/$DAY.csv"
+	[ -s "$EVENTS" ] || echo "$EVENTS_HEADER" > "$EVENTS"
 	[ -s "$DATA_DIR/channelmap.csv" ] || echo "$CHANNELMAP_HEADER" > "$DATA_DIR/channelmap.csv"
 }
 
 store_failed() { # $1=ts $2=reason
-	echo "$1,failed,$(clean "$2"),,,,,,,,,,," >> "$READINGS"
+	echo "$1,failed,$(clean "$2"),,,,,,,,,,,," >> "$READINGS"
 }
 
 # Gzip the days before today, and remove days older than HISTORY_DAYS.
 tidy_store() {
 	local cutoff f name
 	cutoff=$(date -d "@$(( $(date +%s) - HISTORY_DAYS * 86400 ))" +%Y%m%d 2>/dev/null) || return 0
-	for f in "$DATA_DIR"/readings/*.csv* "$DATA_DIR"/channels/*.csv*; do
+	for f in "$DATA_DIR"/readings/*.csv* "$DATA_DIR"/channels/*.csv* "$DATA_DIR"/events/*.csv*; do
 		[ -e "$f" ] || continue
 		name=${f##*/}; name=${name%%.*}
 		case $name in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;; *) continue ;; esac
@@ -328,10 +334,51 @@ store_channels() {
 	fi
 }
 
+# The modem's clock minus the router's, in seconds ("" if unknown).
+# $1=ts $2=modem time "MM/DD/YYYY HH:MM:SS" (the modem's local time)
+clock_offset() {
+	local iso m
+	iso=$(printf '%s' "$2" | awk '{ split($1, d, "/"); if (d[3] != "") printf "%04d-%02d-%02d %s", d[3], d[1], d[2], $2 }')
+	[ -n "$iso" ] || return 0
+	m=$(date -d "$iso" +%s 2>/dev/null) || return 0
+	echo $(( m - $1 ))
+}
+
+# Store the event log entries not seen in the previous read. The modem
+# keeps its last 100 entries (newest first) and drops the oldest, so an
+# entry is identified by its time and message. Its own web logins are not
+# stored (the router's logins would drown out the line's events), and
+# neither are IP addresses or the MAC/version suffix of CM-STATUS lines.
+# $1=ts $2=log text $3=clock offset
+store_events() {
+	local ts=$1 offset=$3
+	printf '%s' "$2" | tr -d '\000-\037",\\<>' | awk -v ts="$ts" -v offset="$offset" -v seen="$DATA_DIR/events.seen" \
+		-v newseen="$DATA_DIR/events.seen.new" -v out="$EVENTS" '
+		BEGIN { while ((getline line < seen) > 0) old[line] = 1; close(seen) }
+		{
+			n = split($0, e, /\}-\{/)
+			for (i = n; i >= 1; i--) {   # oldest first
+				split(e[i], f, /\^/)
+				when = f[2]; level = f[4]; msg = f[5]
+				if (when == "" || msg ~ /WebGUI login/) continue
+				sub(/;CM-MAC=.*$/, "", msg)
+				gsub(/([0-9]+\.){3}[0-9]+/, "x.x.x.x", msg)
+				key = when "^" msg
+				print key > newseen
+				if (key in old) continue
+				old[key] = 1
+				print ts "," when "," offset "," level "," msg >> out
+				added++
+			}
+		}
+		END { printf "%d", added + 0 }'
+	mv -f "$DATA_DIR/events.seen.new" "$DATA_DIR/events.seen" 2>/dev/null
+}
+
 # ---------------------------------------------------------------------- check
 
 do_check() {
-	local ts rows ds us ds_n us_n uptime model firmware reboot=0 boot_ts=""
+	local ts rows ds us ds_n us_n uptime model firmware reboot=0 boot_ts="" modem_time offset new_events
 	load_config
 	mkdir -p "$RUN_DIR" && chmod 700 "$RUN_DIR"
 	ensure_store || { log "cannot write to $DATA_DIR"; return 1; }
@@ -366,10 +413,14 @@ do_check() {
 		log "modem restarted at $(date -d "@$boot_ts" '+%Y-%m-%d %H:%M:%S' 2>/dev/null)"
 	fi
 
+	modem_time=$(clean "$(status_field GetCustomerStatusConnectionInfo CustomerCurSystemTime)")
+	offset=$(clock_offset "$ts" "$modem_time")
+	new_events=$(store_events "$ts" "$(status_field GetCustomerStatusLog CustomerStatusLogList)" "$offset")
+
 	echo "$ts ${uptime:-0}" > "$DATA_DIR/last.new"
 	[ -n "$rows" ] && store_channels "$ts" "$reboot" "$rows"
 	mv -f "$DATA_DIR/last.new" "$DATA_DIR/last"
-	echo "$ts,ok,,$model,$firmware,$uptime,$(clean "$(status_field GetCustomerStatusStartupSequence CustomerConnConnectivityComment)"),$(clean "$(status_field GetCustomerStatusStartupSequence CustomerConnBootComment)"),$(clean "$(status_field GetCustomerStatusConnectionInfo CustomerConnNetworkAccess)"),$(clean "$(status_field GetCustomerStatusConnectionInfo CustomerCurSystemTime)"),$ds_n,$us_n,$reboot,$boot_ts" >> "$READINGS"
+	echo "$ts,ok,,$model,$firmware,$uptime,$(clean "$(status_field GetCustomerStatusStartupSequence CustomerConnConnectivityComment)"),$(clean "$(status_field GetCustomerStatusStartupSequence CustomerConnBootComment)"),$(clean "$(status_field GetCustomerStatusConnectionInfo CustomerConnNetworkAccess)"),$modem_time,$ds_n,$us_n,$reboot,$boot_ts,$offset" >> "$READINGS"
 
 	# What identifies the modem to the ISP; overwritten on every good reading.
 	{
@@ -380,7 +431,7 @@ do_check() {
 	} > "$DATA_DIR/modem.txt.new" && mv -f "$DATA_DIR/modem.txt.new" "$DATA_DIR/modem.txt"
 
 	rm -f "$RUN_DIR/status.json"
-	echo "ok: $model, $ds_n downstream and $us_n upstream channels, up ${uptime}s$([ $reboot = 1 ] && echo ', restarted since the last check')"
+	echo "ok: $model, $ds_n downstream and $us_n upstream channels, up ${uptime}s, ${new_events:-0} new events$([ $reboot = 1 ] && echo ', restarted since the last check')"
 }
 
 do_logout() {
