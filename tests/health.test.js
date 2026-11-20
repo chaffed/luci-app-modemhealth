@@ -143,6 +143,14 @@ eq(H.outages([ R(T, 0, 0), R(T + 300, '', '', { result: 'failed', reason: 'no_pa
 	'outages: a check without ping results is not an outage');
 eq(H.outages([ R(T + 600, 0, 0), R(T + 300, 100, 0), R(T, 0, 0) ]).length, 1, 'outages: readings in any order');
 
+/* The backend's awk (outages_csv, for the copy on a drive) is held to the
+ * same answers: see tests/fixtures/outages. */
+var fx = fs.readFileSync(path.join(ROOT, 'tests/fixtures/outages/readings.csv'), 'utf8').split('\n').filter(Boolean);
+var cols = fx[0].split(',');
+var fxRows = fx.slice(1).map(function(l) { var f = l.split(','), r = {}; cols.forEach(function(c, i) { r[c] = f[i] != null ? f[i] : ''; }); return r; });
+eq(H.outages(fxRows).map(function(x) { return { start: x.start, end: x.end, kind: x.kind, checks: x.checks, minS: x.minS, maxS: x.maxS, ongoing: x.ongoing }; }),
+	JSON.parse(fs.readFileSync(path.join(ROOT, 'tests/fixtures/outages/expected.json'), 'utf8')), 'outages: the fixture shared with the backend gives the expected five');
+
 /* --------------------------------------------------- quiet line is healthy */
 var quiet = H.periodVerdict({ hours: 24 * 7, readings: new Array(2016).fill({ level: 'healthy' }), events: [], reboots: 0, outages: [] });
 eq(quiet.level, 'healthy', 'a week of good readings with no events is healthy');

@@ -1,0 +1,47 @@
+[
+ {
+  "start": 1795000300,
+  "end": 1795000600,
+  "kind": "line_down",
+  "checks": 2,
+  "minS": 300,
+  "maxS": 900,
+  "ongoing": false
+ },
+ {
+  "start": 1795001500,
+  "end": 1795001800,
+  "kind": "modem_unreachable",
+  "checks": 2,
+  "minS": 300,
+  "maxS": 900,
+  "ongoing": false
+ },
+ {
+  "start": 1795002700,
+  "end": 1795002700,
+  "kind": "line_down",
+  "checks": 1,
+  "minS": 0,
+  "maxS": null,
+  "ongoing": false
+ },
+ {
+  "start": 1795009900,
+  "end": 1795009900,
+  "kind": "line_down",
+  "checks": 1,
+  "minS": 0,
+  "maxS": null,
+  "ongoing": false
+ },
+ {
+  "start": 1795010500,
+  "end": 1795010800,
+  "kind": "modem_unreachable",
+  "checks": 2,
+  "minS": 300,
+  "maxS": null,
+  "ongoing": true
+ }
+]

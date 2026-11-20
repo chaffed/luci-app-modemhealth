@@ -1,0 +1,46 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="generator" content="Modem Health (github.com/chaffed/luci-app-modemhealth)">
+<title>Cable line health report</title>
+<style>
+:root{color-scheme:light}
+#mh-bar{font:14px/1.45 -apple-system,"Segoe UI",Helvetica,Arial,sans-serif;color:#1c1c1e;background:#f3f4f6;border:1px solid #c9c9c9;border-radius:8px;padding:12px 14px;margin:0 0 22px}
+#mh-bar p{margin:0 0 8px}
+#mh-bar .row{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;margin:8px 0}
+#mh-bar select,#mh-bar input[type=date],#mh-bar textarea,#mh-bar button{font:inherit;font-size:16px;color:inherit;background:#fff;border:1px solid #8a8a8a;border-radius:6px;padding:7px 10px}
+#mh-bar select,#mh-bar input[type=date],#mh-bar button{min-height:44px}
+#mh-bar textarea{display:block;width:100%;min-height:74px;resize:vertical;box-sizing:border-box}
+#mh-bar button{cursor:pointer;background:#1f5fae;border-color:#1f5fae;color:#fff;font-weight:600;padding:7px 16px}
+#mh-bar button:hover{background:#184c8c}
+#mh-bar :focus-visible{outline:3px solid #1f5fae;outline-offset:2px}
+#mh-bar input[type=checkbox]{width:18px;height:18px;vertical-align:-3px}
+#mh-bar .muted{color:#555;font-size:13px}
+#mh-problem{font:14px/1.45 -apple-system,"Segoe UI",Helvetica,Arial,sans-serif;border:1px solid #b3261e;background:#fbeeed;border-radius:6px;padding:10px 12px}
+[hidden]{display:none!important}
+@media print{#mh-bar{display:none}}
+</style>
+</head>
+<body>
+<div id="mh-bar" hidden>
+	<p><strong>Modem Health report</strong> · <span id="mh-saved"></span></p>
+	<div class="row">
+		<label>Period <select id="mh-period"></select></label>
+		<span id="mh-custom" hidden>
+			<input type="date" id="mh-from" aria-label="From date"> – <input type="date" id="mh-to" aria-label="To date">
+		</span>
+		<label><input type="checkbox" id="mh-times" checked> List every event with its time</label>
+	</div>
+	<label for="mh-notes">Subscriber's statement (optional; printed in the report)</label>
+	<textarea id="mh-notes" placeholder="Anything you want the reader to know, in your own words, such as when you first reported the problem and any ticket numbers."></textarea>
+	<div class="row">
+		<button type="button" id="mh-print">Print / save as PDF</button>
+		<span class="muted" id="mh-status" role="status"></span>
+	</div>
+	<p class="muted">This box is not printed. The file holds the history the router had stored when it saved it; the files modemhealth-readings.csv, -channels.csv and -events.csv next to it hold all of it.</p>
+</div>
+<main id="mh-report">
+	<noscript><p>This report is drawn by a script inside this file, and scripts are switched off in this browser. The measurements themselves are in the files modemhealth-readings.csv, modemhealth-channels.csv and modemhealth-events.csv next to this one.</p></noscript>
+</main>

@@ -26,6 +26,10 @@
 # shellcheck shell=dash
 
 CONFIG=modemhealth
+SHARE=${MODEMHEALTH_SHARE:-/usr/share/modemhealth}
+WWW=${MODEMHEALTH_WWW:-/www/luci-static/resources/modemhealth}
+# The report file on a drive carries this many days of history.
+REPORT_DAYS=30
 VERSION=0.1.0   # the package's PKG_VERSION (tests/settings.test.js checks)
 HNAP_NS='http://purenetworks.com/HNAP1/'
 STATUS_ACTIONS='GetCustomerStatusStartupSequence GetCustomerStatusConnectionInfo GetCustomerStatusDownstreamChannelInfo GetCustomerStatusUpstreamChannelInfo GetCustomerStatusSoftware GetCustomerStatusLog'
@@ -62,6 +66,7 @@ load_config() {
 	HISTORY_DAYS=$(int_or "$(uci -q get "$CONFIG.main.history_days")" 90)
 	[ "$HISTORY_DAYS" -ge 1 ] || HISTORY_DAYS=1
 	RUN_DIR=${MODEMHEALTH_RUN_DIR:-/var/run/modemhealth}
+	EXPORT_DIR=$(uci -q get "$CONFIG.main.export_dir")
 	BASE="https://$HOST"
 }
 
@@ -468,6 +473,313 @@ store_events() {
 	mv -f "$DATA_DIR/events.seen.new" "$DATA_DIR/events.seen" 2>/dev/null
 }
 
+# ------------------------------------------------------- copy on a drive
+#
+# With export_dir set, a copy for use without the router is kept in that
+# folder on an attached drive:
+#   modemhealth-readings.csv, -channels.csv, -events.csv
+#                             the history. After every check the rows the
+#                             drive does not have yet are added at the end;
+#                             nothing is rewritten, so a drive that was away
+#                             is brought up to date by the next check, and
+#                             the files keep growing after the router has
+#                             dropped its own old days.
+#   modemhealth-lineup.csv    the channel line-up (when it changed)
+#   modemhealth-outages.csv   the outages in the readings file (when changed)
+#   modemhealth-report.html   the report: the last REPORT_DAYS days of
+#                             history and the report's own code in one file
+#                             that any browser opens. It holds megabytes, so
+#                             it is written once a day and on "save now",
+#                             not at every check, to spare the drive.
+# The folder must be on a drive that is attached right now: the mount point
+# of an unplugged drive is a folder in the router's RAM or flash, exactly
+# where a copy must not go. That is checked before anything is created. When
+# the copy cannot be written, nothing is written anywhere else, the reason
+# is kept for the status display, and the next check tries again.
+
+# Mount point and filesystem type holding a path: the longest match in
+# /proc/mounts (a later mount on the same point wins).
+mount_of() { # $1=absolute path
+	awk -v p="$1" '
+		{
+			m = $2
+			if (m == "/" || p == m || index(p, m "/") == 1)
+				if (length(m) >= length(best)) { best = m; fs = $3 }
+		}
+		END { if (best != "") print best, fs }' /proc/mounts 2>/dev/null
+}
+
+# Filesystems that are the router itself (its flash, its RAM, the kernel)
+# rather than something plugged into it.
+internal_fs() {
+	case "$1" in
+		''|rootfs|overlay|squashfs|jffs2|ubifs|tmpfs|ramfs|devtmpfs|devpts|proc|sysfs) return 0 ;;
+		debugfs|tracefs|pstore|bpf|cgroup*|autofs|mqueue|securityfs|configfs|fusectl) return 0 ;;
+	esac
+	return 1
+}
+
+# Nearest existing directory at or above a path, with symlinks resolved.
+existing_dir() { # $1=absolute path
+	local d="$1"
+	while [ -n "$d" ] && [ ! -d "$d" ]; do d=${d%/*}; done
+	( cd "${d:-/}" 2>/dev/null && pwd -P )
+}
+
+# True when a folder is, or would be created, on an attached drive.
+on_drive() { # $1=folder
+	# shellcheck disable=SC2046
+	set -- $(mount_of "$(existing_dir "$1")")
+	case "$1" in ''|/|/rom|/overlay) return 1 ;; esac
+	! internal_fs "$2"
+}
+
+# Mount points of attached, writable drives, as suggestions for Settings.
+list_drives() {
+	local mp fs opts
+	while read -r _ mp fs opts _; do
+		case "$opts" in ro|ro,*) continue ;; esac
+		case "$mp" in
+			/|/rom*|/overlay*|/boot*|/proc*|/sys*|/dev*|/etc*|/lib*|/usr*|/www*|/bin*|/sbin*) continue ;;
+			*[!A-Za-z0-9._/-]*) continue ;;
+		esac
+		internal_fs "$fs" && continue
+		[ -d "$mp" ] && echo "$mp"
+	done < /proc/mounts | sort -u
+}
+
+# Outcome of the last attempt: time, ok|nodrive|error, folder, reason.
+export_state() { # $1=ok|nodrive|error $2=reason
+	mkdir -p "$RUN_DIR"
+	printf '%s\n%s\n%s\n%s\n' "$(date +%s)" "$1" "$EXPORT_DIR" "$2" > "$RUN_DIR/export"
+}
+
+export_fail() { # $1=nodrive|error $2=reason; logged once, not after every check
+	[ "$(sed -n '2,4p' "$RUN_DIR/export" 2>/dev/null | tr '\n' '|')" = "$1|$EXPORT_DIR|$2|" ] ||
+		log "copy to $EXPORT_DIR not saved: $2"
+	export_state "$1" "$2"
+	return 1
+}
+
+# Add the rows of one kind that the drive's file does not have yet: those
+# after the last one it holds.
+export_append() { # $1=kind $2=header
+	local dest="$EXPORT_DIR/modemhealth-$1.csv" last=0
+	if [ -s "$dest" ]; then
+		last=$(int_or "$(tail -c 4096 "$dest" | tail -n 1 | cut -d, -f1)" 0)
+	else
+		echo "$2" > "$dest" || return 1
+	fi
+	rows_between "$1" $(( last + 1 )) 9999999999 >> "$dest" || return 1
+}
+
+# Replace a file on the drive when what it should hold has changed. The new
+# content is written next to it and renamed once complete, so a half-written
+# file never replaces a good one.
+export_replace() { # $1=name; content on stdin
+	local dest="$EXPORT_DIR/$1"
+	cat > "$dest.part" || { rm -f "$dest.part"; return 1; }
+	if [ -e "$dest" ] && [ "$(md5sum < "$dest")" = "$(md5sum < "$dest.part")" ]; then
+		rm -f "$dest.part"
+	else
+		mv -f "$dest.part" "$dest" || { rm -f "$dest.part"; return 1; }
+	fi
+}
+
+# The outages in a readings file, as the pages work them out (health.js:
+# outages; both are checked against tests/fixtures/outages). An outage runs
+# from the first to the last check in a row that got no answer from the
+# internet; min_s is what those checks prove, max_s the time between the
+# good checks around it (empty: unknown).
+outages_csv() { # $1=readings csv
+	awk -F, -v gap="$(( INTERVAL * 180 > 1800 ? INTERVAL * 180 : 1800 ))" '
+		function when(t) { return strftime("%Y-%m-%d %H:%M:%S", t) }
+		NR == 1 || $18 == "" || $1 !~ /^[0-9]+$/ { next }
+		{
+			ts = $1 + 0
+			if (open && prev != "" && ts - prev > gap) { a[n] = ""; open = 0 }
+			if ($18 + 0 == 100) {
+				if (!open) {
+					open = 1; n++; s[n] = ts; c[n] = 0; k[n] = "line_down"
+					b[n] = (good != "" && ts - good <= gap) ? good : ""
+				}
+				e[n] = ts; c[n]++
+				if (($16 != "" && $16 + 0 == 100) || ($2 == "failed" && ($3 == "unreachable" || $3 == "timeout"))) k[n] = "modem_unreachable"
+			} else {
+				if (open) { a[n] = ts; open = 0 }
+				good = ts
+			}
+			prev = ts; lastts = ts
+		}
+		END {
+			if (open) a[n] = ""
+			print "start,start_time,end,end_time,kind,checks,min_s,max_s,ongoing"
+			for (i = 1; i <= n; i++)
+				print s[i] "," when(s[i]) "," e[i] "," when(e[i]) "," k[i] "," c[i] "," e[i] - s[i] "," \
+					((b[i] != "" && a[i] != "") ? a[i] - b[i] : "") "," ((a[i] == "" && e[i] == lastts) ? 1 : 0)
+		}' "$1"
+}
+
+cfg_json() { json_str "$(uci -q get "$CONFIG.main.$1")"; }
+
+# The report file. It carries the last REPORT_DAYS days of history, the
+# settings the report needs and the modules the Report page uses, so it
+# draws the same report in any browser, without the router (see
+# standalone.js). The modem password is not among what it carries.
+report_html() {
+	local f k v since first=1
+	for f in "$SHARE/standalone.html" "$SHARE/standalone.js" "$WWW/health.js" "$WWW/common.js" "$WWW/report.js"; do
+		[ -r "$f" ] || return 1
+	done
+	since=$(( $(date +%s) - REPORT_DAYS * 86400 ))
+	cat "$SHARE/standalone.html" || return 1
+	# The history as text; "&" and "<" are the only characters that mean
+	# anything to a browser there.
+	for k in readings channels events; do
+		printf '<pre hidden id="mh-%s">\n' "$k"
+		{
+			case $k in readings) echo "$READINGS_HEADER" ;; channels) echo "$CHANNELS_HEADER" ;; events) echo "$EVENTS_HEADER" ;; esac
+			rows_between "$k" "$since" 9999999999
+		} | sed 's/&/\&amp;/g; s/</\&lt;/g'
+		printf '</pre>\n'
+	done
+	printf '<pre hidden id="mh-channelmap">\n'
+	lineup_between "$since" 9999999999 | sed 's/&/\&amp;/g; s/</\&lt;/g'
+	printf '</pre>\n<script type="application/json" id="mh-ctx">\n'
+	{
+		printf '{"exported":%s,"since":%s,"version":%s,"interval":%s,"ping_host":%s,' \
+			"$(date +%s)" "$since" "$(json_str "$VERSION")" "$INTERVAL" "$(json_str "$PING_HOST")"
+		printf '"sub":{"isp":%s,"subscriber":%s,"account":%s,"address":%s},"modem":{' \
+			"$(cfg_json isp_name)" "$(cfg_json subscriber)" "$(cfg_json account)" "$(cfg_json service_address)"
+		if [ -s "$DATA_DIR/modem.txt" ]; then
+			while IFS='=' read -r k v; do
+				[ -n "$k" ] || continue
+				[ $first = 1 ] || printf ','
+				first=0
+				printf '%s:%s' "$(json_str "$k")" "$(json_str "$v")"
+			done < "$DATA_DIR/modem.txt"
+		fi
+		printf '},"limits":{'
+		first=1
+		uci -q show "$CONFIG.limits" | sed -n "s/^$CONFIG\\.limits\\.\\([a-z0-9_]*\\)='\\(.*\\)'\$/\\1 \\2/p" | while read -r k v; do
+			[ $first = 1 ] || printf ','
+			first=0
+			printf '%s:%s' "$(json_str "$k")" "$(json_str "$v")"
+		done
+		printf '}}\n'
+	} | sed 's/</\\u003c/g'
+	printf '</script>\n<script>\nvar MH_MODULES = {};\nMH_MODULES.health = function(baseclass) {\n'
+	cat "$WWW/health.js" || return 1
+	printf '\n};\nMH_MODULES.common = function(baseclass, rpc, health) {\n'
+	cat "$WWW/common.js" || return 1
+	printf '\n};\nMH_MODULES.report = function(baseclass, mh) {\n'
+	cat "$WWW/report.js" || return 1
+	printf '\n};\n</script>\n<script>\n'
+	cat "$SHARE/standalone.js" || return 1
+	printf '</script>\n</body>\n</html>\n'
+}
+
+export_files() { # $1=1: write the report file whatever its age
+	local dir="$EXPORT_DIR" report="$EXPORT_DIR/modemhealth-report.html"
+	if ! on_drive "$dir"; then
+		export_fail nodrive "the folder is not on a connected drive"
+		return 1
+	fi
+	if ! mkdir -p "$dir" 2>/dev/null || [ ! -d "$dir" ]; then
+		export_fail error "the folder cannot be created on the drive (read-only?)"
+		return 1
+	fi
+	ensure_store 2>/dev/null
+	if ! { export_append readings "$READINGS_HEADER" && export_append channels "$CHANNELS_HEADER" &&
+		export_append events "$EVENTS_HEADER" && export_replace modemhealth-lineup.csv < "$DATA_DIR/channelmap.csv" &&
+		outages_csv "$dir/modemhealth-readings.csv" | export_replace modemhealth-outages.csv; } 2>/dev/null; then
+		export_fail error "the drive cannot be written to (full or read-only?)"
+		return 1
+	fi
+	# Once a day, and when asked for.
+	if [ "$1" = 1 ] || [ ! -s "$report" ] || [ "$(date -r "$report" +%Y-%m-%d 2>/dev/null)" != "$(today)" ]; then
+		if ! { report_html > "$report.part" && mv -f "$report.part" "$report"; } 2>/dev/null; then
+			rm -f "$report.part" 2>/dev/null
+			export_fail error "the history was saved, but the report file could not be written"
+			return 1
+		fi
+	fi
+	sync
+	[ "$(sed -n 2p "$RUN_DIR/export" 2>/dev/null)" = ok ] || log "history and report saved to $dir"
+	export_state ok ""
+}
+
+export_now() { # $1=1: with the report file
+	local lock="$RUN_DIR/export.lock" pid rc=0
+	[ -n "$EXPORT_DIR" ] || return 0
+	mkdir -p "$RUN_DIR"
+	# One writer at a time ("save now" pressed while a check finishes).
+	if ! mkdir "$lock" 2>/dev/null; then
+		pid=$(cat "$lock/pid" 2>/dev/null)
+		[ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && return 0
+		rm -rf "$lock"
+		mkdir "$lock" 2>/dev/null || return 0
+	fi
+	read -r pid _ < /proc/self/stat
+	echo "$pid" > "$lock/pid"
+	# Readable by whoever plugs the drive into a computer, whatever umask
+	# the caller (rpcd, procd) happens to run with.
+	( umask 022; export_files "$1" ) || rc=1
+	rm -rf "$lock"
+	return "$rc"
+}
+
+# The state of the copy, for the pages.
+export_json() {
+	local ts="" state="" dir="" msg="" mounted=false
+	if [ -n "$EXPORT_DIR" ]; then
+		on_drive "$EXPORT_DIR" && mounted=true
+		if [ -s "$RUN_DIR/export" ]; then
+			{ read -r ts; read -r state; read -r dir; read -r msg; } < "$RUN_DIR/export"
+			# About another folder: the setting has changed since.
+			[ "$dir" = "$EXPORT_DIR" ] || { ts=""; state=""; msg=""; }
+		fi
+	fi
+	printf '{"dir":%s,"mounted":%s,"ts":%s,"ok":%s,"message":%s}' "$(json_str "$EXPORT_DIR")" "$mounted" "$(json_num "$ts")" \
+		"$(case $state in ok) echo true ;; '') echo null ;; *) echo false ;; esac)" "$(json_str "$msg")"
+}
+
+do_export() {
+	load_config
+	export_now 1
+	export_json
+	echo
+}
+
+# "Clear history" must not take the copy on the drive with it (the next
+# check would carry on in the same files), so that copy is first set aside
+# under a dated name.
+archive_export() {
+	local dir="$EXPORT_DIR" stamp f base kept=0
+	[ -n "$dir" ] || return 0
+	on_drive "$dir" || return 0
+	stamp=$(date +%Y%m%d-%H%M%S)
+	for f in "$dir"/modemhealth-readings.csv "$dir"/modemhealth-channels.csv "$dir"/modemhealth-events.csv \
+		"$dir"/modemhealth-lineup.csv "$dir"/modemhealth-outages.csv "$dir"/modemhealth-report.html; do
+		[ -e "$f" ] || continue
+		base=${f##*/}
+		mv "$f" "$dir/${base%.*}-until-$stamp.${base##*.}" 2>/dev/null && kept=1
+	done
+	sync
+	[ $kept = 1 ] && log "history cleared; the copy on the drive was kept under names ending in -until-$stamp"
+	return 0
+}
+
+do_clear() {
+	load_config
+	archive_export
+	rm -rf "$DATA_DIR/readings" "$DATA_DIR/channels" "$DATA_DIR/events"
+	rm -f "$DATA_DIR/events.seen" "$DATA_DIR/channelmap.csv" "$DATA_DIR/channelmap.last" "$DATA_DIR/last" "$RUN_DIR/export" "$RUN_DIR/lineup_tidied"
+	ensure_store
+	log "history cleared"
+	echo '{"cleared":true}'
+}
+
 # ---------------------------------------------------------------------- check
 
 do_check() {
@@ -485,6 +797,7 @@ do_check() {
 		store_failed "$ts" "$FAIL_REASON"
 		rm -f "$RUN_DIR/status.json"
 		log "check failed: $FAIL_REASON"
+		export_now
 		echo "failed: $FAIL_REASON"
 		return 1
 	fi
@@ -525,6 +838,7 @@ do_check() {
 	} > "$DATA_DIR/modem.txt.new" && mv -f "$DATA_DIR/modem.txt.new" "$DATA_DIR/modem.txt"
 
 	rm -f "$RUN_DIR/status.json"
+	export_now
 	echo "ok: $model, $ds_n downstream and $us_n upstream channels, up ${uptime}s, ${new_events:-0} new events$([ $reboot = 1 ] && echo ', restarted since the last check')"
 }
 
@@ -645,6 +959,17 @@ rows_between() { # $1=kind $2=since $3=until
 	done | awk -F, -v s="$2" -v u="$3" '$1 + 0 >= s && $1 + 0 <= u'
 }
 
+# The line-up as it was at SINCE (the last entry of each channel before it)
+# and every change up to UNTIL, with the header.
+lineup_between() { # $1=since $2=until
+	awk -F, -v s="$1" -v u="$2" '
+		NR == 1 { print; next }
+		$1 + 0 < s { k = $2 "," $4; if (!(k in last)) order[++n] = k; last[k] = $0; next }
+		$1 + 0 <= u { later[++m] = $0 }
+		END { for (i = 1; i <= n; i++) print last[order[i]]; for (i = 1; i <= m; i++) print later[i] }
+	' "$DATA_DIR/channelmap.csv" 2>/dev/null
+}
+
 # stdin -> a JSON string
 json_text() {
 	awk 'BEGIN { printf "\"" } { gsub(/\\/, "\\\\"); gsub(/"/, "\\\""); gsub(/[\001-\037]/, ""); printf "%s\\n", $0 } END { printf "\"" }'
@@ -666,12 +991,7 @@ do_data() {
 	# it) and every change up to UNTIL. On a line whose channels keep
 	# losing lock the whole history would outgrow a reply.
 	printf ',"channelmap":'
-	awk -F, -v s="$since" -v u="$until" '
-		NR == 1 { print; next }
-		$1 + 0 < s { k = $2 "," $4; if (!(k in last)) order[++n] = k; last[k] = $0; next }
-		$1 + 0 <= u { later[++m] = $0 }
-		END { for (i = 1; i <= n; i++) print last[order[i]]; for (i = 1; i <= m; i++) print later[i] }
-	' "$DATA_DIR/channelmap.csv" 2>/dev/null | json_text
+	lineup_between "$since" "$until" | json_text
 	echo '}'
 }
 
@@ -695,7 +1015,16 @@ do_status() {
 			printf '%s:%s' "$(json_str "$k")" "$(json_str "$v")"
 		done < "$DATA_DIR/modem.txt"
 	fi
-	echo '}}'
+	printf '},"export":'
+	export_json
+	printf ',"drives":['
+	first=1
+	for k in $(list_drives); do
+		[ $first = 1 ] || printf ','
+		first=0
+		json_str "$k"
+	done
+	echo ']}'
 }
 
 # The GL.iNet panel's web server can give a command neither input nor
@@ -783,8 +1112,10 @@ case "$1" in
 	test) do_test "$2" ;;
 	test-input) do_test_input ;;
 	set-password) do_set_password ;;
+	export) do_export ;;
+	clear) do_clear ;;
 	*)
-		echo "usage: modemhealth check|history [N]|last|logout|daemon|status|data SINCE [UNTIL]|test [FILE]|test-input|set-password" >&2
+		echo "usage: modemhealth check|history [N]|last|logout|daemon|status|data SINCE [UNTIL]|test [FILE]|test-input|set-password|export|clear" >&2
 		exit 2
 		;;
 esac

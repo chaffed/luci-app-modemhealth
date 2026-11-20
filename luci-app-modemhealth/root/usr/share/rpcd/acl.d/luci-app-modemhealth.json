@@ -17,7 +17,9 @@
 				"luci.modemhealth": [
 					"check",
 					"test",
-					"set_password"
+					"set_password",
+					"export",
+					"clear"
 				]
 			},
 			"uci": [

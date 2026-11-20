@@ -203,6 +203,12 @@ async function main() {
 	eq(rb.hints({ sub: {}, modem: {} }).length, 2, 'hints: missing account details and an unread modem are pointed out');
 	eq(rb.hints({ sub: { subscriber: 'A', account: '1' }, modem: MODEM }).length, 0, 'hints: none when nothing is missing');
 
+	/* ------------- the router pastes these files into <script> elements */
+	[ 'modemhealth/health.js', 'modemhealth/common.js', 'modemhealth/report.js' ].map(function(f) { return [ f, read(f) ]; })
+		.concat([ [ 'standalone.js', fs.readFileSync(path.join(PKG, 'root/usr/share/modemhealth/standalone.js'), 'utf8') ] ]).forEach(function(f) {
+			ok(!/<\/script|<!--/i.test(f[1]), f[0] + ' can be embedded in a <script> element of the report file on a drive');
+		});
+
 	/* ------------------------------- LuCI's format() reads more than %s */
 	/* In LuCI a "%" followed by a space or by one of b c o q t m u x X j is a
 	 * conversion too, so "below 80% of" swallows an argument and prints
@@ -210,7 +216,8 @@ async function main() {
 	 * zero padding or a precision) or a doubled "%%". */
 	var views = path.join(RES, 'view/modemhealth');
 	var sources = [ 'modemhealth/common.js', 'modemhealth/report.js', 'modemhealth/gl.js', 'modemhealth/health.js' ].map(function(f) { return path.join(RES, f); })
-		.concat(fs.readdirSync(views).map(function(f) { return path.join(views, f); }));
+		.concat(fs.readdirSync(views).map(function(f) { return path.join(views, f); }))
+		.concat([ path.join(PKG, 'root/usr/share/modemhealth/standalone.js') ]);
 	var stray = [], found = 0;
 	sources.forEach(function(f) {
 		var src = fs.readFileSync(f, 'utf8'), re = /'((?:[^'\\\n]|\\.)*)'\)?\s*\.format\(/g, m;

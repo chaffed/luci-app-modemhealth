@@ -47,7 +47,7 @@ def uci_quote(value):
     return "'" + value.replace("'", "'\\''") + "'"
 
 
-def config(host, password, data_dir, ping_host="modem"):
+def config(host, password, data_dir, ping_host="modem", export_dir=None):
     return "\n".join([
         "config modemhealth 'main'",
         "\toption host %s" % uci_quote(host),
@@ -55,14 +55,15 @@ def config(host, password, data_dir, ping_host="modem"):
         "\toption password %s" % uci_quote(password),
         "\toption timeout '5'",
         "\toption ping_host %s" % uci_quote(ping_host),
-        "\toption data_dir %s" % uci_quote(data_dir),
-        ""])
+        "\toption data_dir %s" % uci_quote(data_dir)]
+        + (["\toption export_dir %s" % uci_quote(export_dir)] if export_dir else [])
+        + ["\toption subscriber 'Zoe Example'", ""])
 
 
 def run_in_openwrt(out, scenarios):
     """scenarios: (name, config text, shell before, [shell after, [command]]);
     the command defaults to `modemhealth check`"""
-    script = ["set -u", "cp -R /pkg/. /", "chmod 755 /usr/bin/modemhealth", "mkdir -p /var/run"]
+    script = ["set -u", "cp -R /pkg/. /", "mkdir -p /www && cp -R /htdocs/. /www/", "chmod 755 /usr/bin/modemhealth", "mkdir -p /var/run"]
     for scenario in scenarios:
         name, cfg, before = scenario[:3]
         after = scenario[3] if len(scenario) > 3 else ":"
@@ -83,6 +84,7 @@ def run_in_openwrt(out, scenarios):
         "docker", "run", "--rm", "--platform", "linux/amd64",
         "--add-host", "modem:host-gateway",
         "-v", os.path.join(ROOT, "luci-app-modemhealth", "root") + ":/pkg:ro",
+        "-v", os.path.join(ROOT, "luci-app-modemhealth", "htdocs") + ":/htdocs:ro",
         "-v", out + ":/out",
         IMAGE, "sh", "-c", "\n".join(script)], check=True)
 
@@ -123,6 +125,7 @@ def main():
     # Inside the repo: Docker Desktop does not share the system temp folder.
     out = tempfile.mkdtemp(prefix="backend-", dir=os.path.join(ROOT, ".test-out"))
     try:
+        shutil.copy(os.path.join(ROOT, "tests", "fixtures", "outages", "readings.csv"), os.path.join(out, "outages_fixture.csv"))
         for _ in range(50):
             try:
                 socket.create_connection(("127.0.0.1", PORT), timeout=0.2).close()
@@ -238,6 +241,32 @@ def main():
              "100,ds,1,20,256QAM,501000000, 100,us,1,1,SC-QAM,16400000,6400000 200,ds,1,20,Unknown,501000000, "
              "300,ds,1,20,256QAM,501000000, 400,us,1,1,SC-QAM,16400000,3200000 > /out/web_lineup/data/channelmap.csv",
              ":", "modemhealth data 250 350"),
+            # The copy on a drive. /out is a folder of the host shared with the
+            # container: to the backend, a mounted drive.
+            ("export", config(host, PASSWORD, "/out/export/data", export_dir="/out/export/drive/modemhealth"),
+             "modemhealth check >/dev/null; md5sum < /out/export/drive/modemhealth/modemhealth-report.html > /out/export/report1.md5; "
+             "cp /out/export/drive/modemhealth/modemhealth-channels.csv /out/export/channels1.csv; mount > /out/export/mounts",
+             "md5sum < /out/export/drive/modemhealth/modemhealth-report.html > /out/export/report2.md5; "
+             "modemhealth status > /out/export/status.json; sleep 1; modemhealth export > /out/export/export.json; "
+             "md5sum < /out/export/drive/modemhealth/modemhealth-report.html > /out/export/report3.md5; ls /out/export/drive/modemhealth > /out/export/ls"),
+            # A folder that is not on a drive: nothing may be created there.
+            ("export_nodrive", config(host, PASSWORD, "/out/export_nodrive/data", export_dir="/tmp/nodrive/modemhealth"),
+             ":", "ls -d /tmp/nodrive > /out/export_nodrive/ls 2>&1; modemhealth status > /out/export_nodrive/status.json; "
+             "logread 2>/dev/null | grep -c 'not saved' > /out/export_nodrive/logged || true"),
+            # The drive comes back: the next check brings its files up to date.
+            ("export_back", config(host, PASSWORD, "/out/export_back/data", export_dir="/tmp/nodrive/modemhealth"),
+             "modemhealth check >/dev/null; modemhealth check >/dev/null; "
+             "uci set modemhealth.main.export_dir=/out/export_back/drive/modemhealth; uci commit modemhealth"),
+            # Clearing the history sets the copy on the drive aside under a dated name.
+            ("clear", config(host, PASSWORD, "/out/clear/data", export_dir="/out/clear/drive/modemhealth"),
+             "modemhealth check >/dev/null; modemhealth check >/dev/null",
+             "ls /out/clear/drive/modemhealth > /out/clear/ls; cat /out/clear/data/readings/*.csv | wc -l > /out/clear/left; "
+             "ls /out/clear/data > /out/clear/data_ls; modemhealth check >/dev/null; "
+             "wc -l < /out/clear/drive/modemhealth/modemhealth-readings.csv > /out/clear/new",
+             "modemhealth clear"),
+            # The outages file, from the fixture the pages' own rule is held to.
+            ("outages", config(host, PASSWORD, "/out/outages/data"), ":", ":",
+             "sh -c 'MODEMHEALTH_LIB=1 . /usr/bin/modemhealth; load_config; outages_csv /out/outages_fixture.csv'"),
             # Test connection with what is typed (password in the environment),
             # storing nothing and leaving the kept session alone.
             ("web_test", config(host, "", "/out/web_test/data"), ":",
@@ -505,6 +534,67 @@ def main():
               "line-up tidy: of the entries before the kept history only the newest of each channel stays; repeats go (%s)" % before)
         stamp = open(os.path.join(d, "stamp")).read().split()
         check(len(stamp) == 2 and stamp[0] == stamp[1], "line-up tidy: done once a day")
+
+        # --------------------------------------------------- copy on a drive
+        d = os.path.join(out, "export")
+        drive = os.path.join(d, "drive", "modemhealth")
+        rows = lambda name: [l for l in open(os.path.join(drive, name)).read().split("\n") if l]
+        check(sorted(open(os.path.join(d, "ls")).read().split()) == ["modemhealth-channels.csv", "modemhealth-events.csv", "modemhealth-lineup.csv",
+              "modemhealth-outages.csv", "modemhealth-readings.csv", "modemhealth-report.html"], "copy: the history and the report are on the drive, and nothing else")
+        check([len(rows("modemhealth-readings.csv")), len(rows("modemhealth-channels.csv")), len(rows("modemhealth-events.csv")),
+               len(rows("modemhealth-lineup.csv")), len(rows("modemhealth-outages.csv"))] == [1 + 2, 1 + 2 * 39, 1 + 87, 1 + 39, 1],
+              "copy: two checks' readings and channels, the events, the line-up and (no) outages, each with its header")
+        first = open(os.path.join(d, "channels1.csv")).read()
+        check(open(os.path.join(drive, "modemhealth-channels.csv")).read().startswith(first) and first.count("\n") == 1 + 39,
+              "copy: the second check added its rows after the first check's, which were not rewritten")
+        md5 = [open(os.path.join(d, "report%d.md5" % i)).read() for i in (1, 2, 3)]
+        check(md5[0] == md5[1] and md5[2] != md5[0], "copy: the report file is not rewritten at every check, only when asked for (or once a day)")
+        report = open(os.path.join(drive, "modemhealth-report.html")).read()
+        check(report.startswith("<!doctype html>") and report.rstrip().endswith("</html>") and 'id="mh-readings"' in report
+              and "MH_MODULES.report = function" in report and report.count("\n1") > 80 and "Zoe Example" in report,
+              "copy: the report file carries the history, the report details and the report's code (%d KB)" % (len(report) // 1024))
+        ctx = json.loads(report.split('<script type="application/json" id="mh-ctx">')[1].split("</script>")[0])
+        check(ctx["modem"].get("mac") == "00:00:5E:00:53:01" and ctx["version"] == "0.1.0" and ctx["interval"] == 5 and ctx["sub"]["subscriber"] == "Zoe Example"
+              and ctx["limits"] == {}, "copy: its settings are valid JSON with the modem's identity (%s)" % sorted(ctx))
+        text = files_text(drive)
+        check(PASSWORD not in text and "Pa ss" not in text and "password" not in json.dumps(ctx).lower(),
+              "copy: the modem password is in none of the files on the drive, and no setting of that name is carried")
+        st = json.loads(open(os.path.join(d, "status.json")).read())
+        check(st["export"]["dir"] == "/out/export/drive/modemhealth" and st["export"]["mounted"] is True and st["export"]["ok"] is True
+              and abs(st["export"]["ts"] - time.time()) < 600, "copy: the status says where the copy goes and that it was saved (%s)" % st["export"])
+        check("/out" in st["drives"], "copy: the shared folder is offered as a drive (%s)" % st["drives"])
+        ex = json.loads(open(os.path.join(d, "export.json")).read())
+        check(ex["ok"] is True and ex["mounted"] is True, "copy: 'save now' answers with the state of the copy")
+
+        d = os.path.join(out, "export_nodrive")
+        st = json.loads(open(os.path.join(d, "status.json")).read())
+        check("No such file" in open(os.path.join(d, "ls")).read(), "no drive: nothing is created in a folder that is not on a drive")
+        check(st["export"]["mounted"] is False and st["export"]["ok"] is False and st["export"]["message"] == "the folder is not on a connected drive",
+              "no drive: the status says the copy was not saved, and why (%s)" % st["export"])
+        check(stored(d, "readings")[0]["result"] == "ok", "no drive: the check itself is stored on the router as usual")
+
+        d = os.path.join(out, "export_back")
+        back = [l for l in open(os.path.join(d, "drive", "modemhealth", "modemhealth-readings.csv")).read().split("\n") if l]
+        check(len(back) == 1 + 3 and [l.split(",")[0] for l in back[1:]] == [r["ts"] for r in stored(d, "readings")],
+              "drive back: the next check brings the copy up to date with the checks made while it was away")
+
+        d = os.path.join(out, "clear")
+        names = sorted(open(os.path.join(d, "ls")).read().split())
+        check(json.loads(open(os.path.join(d, "output.txt")).read()) == {"cleared": True} and len(names) == 6
+              and all("-until-20" in n and n.startswith("modemhealth-") for n in names) and sum(n.endswith(".html") for n in names) == 1,
+              "clear: the copy on the drive is kept under dated names (%s)" % names[:2])
+        kept = [n for n in os.listdir(os.path.join(d, "drive", "modemhealth")) if n.startswith("modemhealth-readings-until-")]
+        check(len(kept) == 1 and open(os.path.join(d, "drive", "modemhealth", kept[0])).read().count("\n") == 1 + 2, "clear: with the two checks it held")
+        check(open(os.path.join(d, "left")).read().strip() == "1" and "channelmap.last" not in open(os.path.join(d, "data_ls")).read()
+              and "events.seen" not in open(os.path.join(d, "data_ls")).read(), "clear: the router's own history is empty")
+        check(open(os.path.join(d, "new")).read().strip() == "2", "clear: the next check starts new files on the drive")
+
+        expected = json.load(open(os.path.join(ROOT, "tests", "fixtures", "outages", "expected.json")))
+        got = read_csv(os.path.join(out, "outages", "output.txt"))
+        norm = [dict(start=int(o["start"]), end=int(o["end"]), kind=o["kind"], checks=int(o["checks"]), minS=int(o["min_s"]),
+                     maxS=int(o["max_s"]) if o["max_s"] else None, ongoing=o["ongoing"] == "1") for o in got]
+        check(norm == expected, "outages file: the same five outages as the pages find in the shared fixture (%d)" % len(norm))
+        check(all(len(o["start_time"]) == 19 and o["start_time"][:2] == "20" for o in got), "outages file: with the time in words")
 
         # ---------------------------------------------------------- sessions
         def scenario(name):

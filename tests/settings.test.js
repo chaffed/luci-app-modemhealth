@@ -37,15 +37,15 @@ var glOptions = glAll.filter(function(n) { return n !== 'password'; });
 var fieldsBlock = /local FIELDS = \{\n([\s\S]*?)\n\}/.exec(lua)[1];
 var luaFields = all(/^    (\w+) = \{/gm, fieldsBlock);
 
-ok(luciOptions.length >= 10, 'LuCI offers %d settings: %s'.replace('%d', luciOptions.length).replace('%s', luciOptions.join(', ')));
+ok(luciOptions.length >= 11, 'LuCI offers %d settings: %s'.replace('%d', luciOptions.length).replace('%s', luciOptions.join(', ')));
 eq(sorted(glOptions), sorted(luciOptions), 'the panel\'s form offers the same settings as LuCI\'s');
 eq(sorted(luaFields), sorted(luciOptions), 'the panel\'s module accepts the same settings, and no others');
 /* Settings with a default ship it in the package; the report details
  * (free text) have none. */
-var defaults = all(/^\toption (\w+) /gm, config), REPORT = [ 'isp_name', 'subscriber', 'account', 'service_address' ];
+var defaults = all(/^\toption (\w+) /gm, config), REPORT = [ 'isp_name', 'subscriber', 'account', 'service_address', 'export_dir' ];
 var withDefault = luciOptions.filter(function(n) { return REPORT.indexOf(n) < 0; });
 ok(withDefault.every(function(n) { return defaults.indexOf(n) >= 0; }) && REPORT.every(function(n) { return luciOptions.indexOf(n) >= 0 && defaults.indexOf(n) < 0; }),
-	'each has a default in /etc/config/modemhealth, except the four report details');
+	'each has a default in /etc/config/modemhealth, except the four report details and the drive folder');
 var glDefaults = all(/(\w+): '/g, /var DEFAULTS = \{([^}]*)\}/.exec(gl)[1]);
 eq(sorted(glDefaults), sorted(withDefault), 'the panel\'s form knows the default of each');
 withDefault.forEach(function(n) {

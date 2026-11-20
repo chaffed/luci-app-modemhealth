@@ -28,7 +28,7 @@ jobs:
 
       - name: Check JavaScript syntax
         run: |
-          for f in $(find luci-app-modemhealth/htdocs -name '*.js'); do
+          for f in $(find luci-app-modemhealth/htdocs luci-app-modemhealth/root/usr/share/modemhealth -name '*.js'); do
             node -e "new Function('module', require('fs').readFileSync('$f', 'utf8'))"
           done
 

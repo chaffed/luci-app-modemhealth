@@ -161,7 +161,7 @@
 	/* The views call the rpcd object luci.modemhealth; the panel's module
 	 * has the same methods, two under names the panel does not log. */
 	var METHODS = { status: 'get_status', data: 'get_data' };
-	var SECONDS = { check: 150, test: 150, data: 90 };
+	var SECONDS = { check: 150, test: 150, data: 90, 'export': 320, clear: 150 };
 
 	var rpc = {
 		declare: function(o) {
@@ -403,6 +403,8 @@
 		'.cbi-button:disabled,.cbi-button[disabled]{opacity:.55;cursor:default}',
 		'.cbi-button-action,.cbi-button-action:hover{background:var(--primary);border-color:var(--primary);color:#fff}',
 		'.cbi-button-action:hover{background:var(--primary-hover);border-color:var(--primary-hover)}',
+		'.cbi-button-negative{color:var(--error)}',
+		'.cbi-button-negative:hover{border-color:var(--error);color:var(--error)}',
 		':focus-visible{outline:2px solid var(--primary);outline-offset:2px}',
 		'input,select,textarea{font:inherit;color:var(--text-regular);background:var(--mhgl-control);border:1px solid var(--border);border-radius:6px;padding:6px 10px;min-height:36px;box-sizing:border-box;max-width:100%}',
 		'input:focus,select:focus,textarea:focus{border-color:var(--primary);outline:none}',
@@ -424,6 +426,7 @@
 		'@keyframes mhgl-spin{to{transform:rotate(360deg)}}',
 		'@media (prefers-reduced-motion:reduce){.spinning::before{animation:none}}',
 		'.mhgl-backdrop{position:absolute;left:0;right:0;top:0;bottom:0;min-height:100%;background:var(--mask);z-index:50}',
+		'.mhgl-modal .right{display:flex;justify-content:flex-end;gap:8px;margin-top:12px}',
 		'.mhgl-modal{position:absolute;left:50%;transform:translateX(-50%);width:min(480px,calc(100% - 32px));box-sizing:border-box;background:var(--background-card);border-radius:10px;padding:18px 20px;box-shadow:0 12px 32px rgba(0,0,0,.25)}',
 		/* settings */
 		'.mhgl-section{margin:0 0 8px}',
@@ -474,6 +477,13 @@
 		};
 	}
 
+	function pathOk(v) {
+		if (v === '/')
+			return _('Choose a folder on the drive.');
+		return /^\/[A-Za-z0-9._\/-]*$/.test(v) && v.indexOf('..') < 0 && v.length <= 200 ? null
+			: _('Enter a full path starting with "/", using only letters, digits, ".", "_", "-" and "/".');
+	}
+
 	function hostOk(port) {
 		return function(v) {
 			return (port ? /^[A-Za-z0-9.:_\-\[\]]+$/ : /^[A-Za-z0-9.:_-]+$/).test(v) && v.charAt(0) !== '-' && v.length <= 253
@@ -482,6 +492,7 @@
 	}
 
 	function sections(st) {
+		var drives = st.drives || [];
 		return [
 			[ _('Modem'), [
 				{ key: 'host', type: 'text', label: _('Modem address'), check: hostOk(true),
@@ -501,7 +512,12 @@
 			] ],
 			[ _('Storage'), [
 				{ key: 'history_days', type: 'int', min: 1, max: 730, optional: true, label: _('Keep history for (days)'),
-					help: _('About 4–8 MB for 90 days at 5-minute checks.') }
+					help: _('About 4–8 MB for 90 days at 5-minute checks.') },
+				{ key: 'export_dir', type: 'text', optional: true, label: _('Copy to a USB drive (folder)'), check: pathOk,
+					suggestions: drives.map(function(d) { return d + '/modemhealth'; }),
+					help: _('After every check the new rows of the history are added to CSV files in this folder, and once a day the report is saved there as one file that opens in any browser. The router keeps its own copy; while the drive is unplugged the copy is skipped and caught up later. The report file includes the report details. Leave empty to switch this off.') + ' ' +
+						(drives.length ? _('Drives found on this router: %s.').format(drives.join(', '))
+							: _('No attached drive is found at the moment; plug one in and open this page again.')) }
 			] ],
 			[ _('Report details'), [
 				{ key: 'isp_name', type: 'text', optional: true, label: _('Provider'), check: textOk(120),
@@ -549,7 +565,7 @@
 			};
 
 			var control = function(f) {
-				var id = 'mhgl-f-' + f.key, help = f.help ? id + '-help' : null, el;
+				var id = 'mhgl-f-' + f.key, help = f.help ? id + '-help' : null, el, extra = null;
 				var a = { 'id': id, 'name': f.key, 'aria-describedby': help };
 				if (f.type === 'flag') {
 					a.type = 'checkbox';
@@ -575,6 +591,10 @@
 					a.autocomplete = 'off';
 					if (f.type === 'int')
 						a.inputmode = 'numeric';
+					if (f.suggestions && f.suggestions.length) {
+						a.list = id + '-list';
+						extra = E('datalist', { 'id': a.list }, f.suggestions.map(function(v) { return E('option', { 'value': v }); }));
+					}
 					el = E('input', a);
 					el.value = val(f.key);
 					if (f.type === 'int')
@@ -583,7 +603,7 @@
 				var err = E('p', { 'class': 'mhgl-field-error', 'id': id + '-error', 'hidden': '' });
 				var row = E('div', { 'class': 'mhgl-row' }, [
 					E('label', { 'for': id }, [ f.label ]),
-					E('div', {}, [ el, err, f.help ? E('p', { 'class': 'mhgl-help', 'id': help }, [ f.help ]) : '' ])
+					E('div', {}, [ el, extra, err, f.help ? E('p', { 'class': 'mhgl-help', 'id': help }, [ f.help ]) : '' ])
 				]);
 				rows[f.key] = {
 					f: f, row: row, input: el,
@@ -676,9 +696,32 @@
 				}).then(resize);
 			}) }, [ _('Test connection') ]);
 
+			var clearBtn = E('button', { 'type': 'button', 'class': 'cbi-button cbi-button-negative', 'click': function() {
+				ui.showModal(_('Clear history?'), [
+					E('p', {}, [ _('Every stored reading, channel value and modem event on the router will be deleted. This cannot be undone. Files already copied to a USB drive are kept under a dated name.') ]),
+					E('div', { 'class': 'right' }, [
+						E('button', { 'type': 'button', 'class': 'cbi-button', 'click': ui.hideModal }, [ _('Cancel') ]),
+						E('button', { 'type': 'button', 'class': 'cbi-button cbi-button-negative', 'click': function() {
+							return call('clear', {}, 150).then(function() {
+								ui.hideModal();
+								status.textContent = _('History cleared.');
+							}).catch(function(e) {
+								ui.hideModal();
+								status.textContent = _('The history was not cleared: %s').format(e.message);
+							});
+						} }, [ _('Clear history') ])
+					])
+				]);
+			} }, [ _('Clear history…') ]);
+
 			var all = H.limitList();
 			var form = E('form', { 'novalidate': '' }, sections(st).map(function(s, i) {
 				var kids = [ E('h3', {}, [ s[0] ]) ].concat(s[1].map(control));
+				if (s[1].some(function(f) { return f.key === 'export_dir'; }))
+					kids.push(E('div', { 'class': 'mhgl-row' }, [
+						E('div', { 'class': 'mhgl-label' }, [ _('Clear history') ]),
+						E('div', {}, [ clearBtn, E('p', { 'class': 'mhgl-help' }, [ _('Deletes every stored reading and event on the router. A copy on a USB drive is kept under a dated name.') ]) ])
+					]));
 				if (i === 0)
 					kids.push(E('div', { 'class': 'mhgl-row' }, [
 						E('div', { 'class': 'mhgl-label' }, [ _('Test connection') ]),

@@ -171,6 +171,42 @@ return view.extend({
 		o.default = '90';
 		o.placeholder = '90';
 
+		var drives = st.drives || [];
+		o = s.taboption('storage', form.Value, 'export_dir', _('Copy to a USB drive (folder)'),
+			_('After every check the new rows of the history are added to CSV files in this folder, and once a day the report is saved there as one file that opens in any browser. The router keeps its own copy; while the drive is unplugged the copy is skipped and caught up later. The report file includes the report details. Leave empty to switch this off.') + ' ' +
+			(drives.length ? _('Drives found on this router: %s.').format(drives.join(', '))
+				: _('No attached drive is found at the moment; plug one in and open this page again.')));
+		drives.forEach(function(d) { o.value(d + '/modemhealth'); });
+		o.rmempty = true;
+		o.validate = function(section_id, value) {
+			if (!value) return true;
+			if (value === '/') return _('Choose a folder on the drive.');
+			return /^\/[A-Za-z0-9._\/-]*$/.test(value) && value.indexOf('..') < 0 && value.length <= 200 ? true
+				: _('Enter a full path starting with "/", using only letters, digits, ".", "_", "-" and "/".');
+		};
+
+		o = s.taboption('storage', form.Button, '_clear', _('Clear history'),
+			_('Deletes every stored reading and event on the router. A copy on a USB drive is kept under a dated name.'));
+		o.inputtitle = _('Clear history…');
+		o.inputstyle = 'negative';
+		o.onclick = function() {
+			ui.showModal(_('Clear history?'), [
+				E('p', {}, [ _('Every stored reading, channel value and modem event on the router will be deleted. This cannot be undone. Files already copied to a USB drive are kept under a dated name.') ]),
+				E('div', { 'class': 'right' }, [
+					E('button', { 'class': 'cbi-button', 'click': ui.hideModal }, [ _('Cancel') ]), ' ',
+					E('button', { 'class': 'cbi-button cbi-button-negative', 'click': function() {
+						return mh.callClear().then(function() {
+							ui.hideModal();
+							ui.addNotification(null, E('p', {}, [ _('History cleared.') ]), 'info');
+						}).catch(function(e) {
+							ui.hideModal();
+							ui.addNotification(null, E('p', {}, [ _('The history was not cleared: %s').format(String(e.message || e)) ]), 'warning');
+						});
+					} }, [ _('Clear history') ])
+				])
+			]);
+		};
+
 		/* Printed on the report so that the provider can match it to an
 		 * account; one line of text each. */
 		[ [ 'isp_name', _('Provider'), _('This and the following details are only used on the report.') ],

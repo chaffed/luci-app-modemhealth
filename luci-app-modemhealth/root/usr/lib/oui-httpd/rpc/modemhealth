@@ -99,6 +99,22 @@ M.check = function()
     return run_json({ "status" })
 end
 
+--[[
+    @method-name: export
+    @method-desc: Save the history and the report to the USB drive now, and return the state of that copy.
+--]]
+M.export = function()
+    return run_json({ "export" }, 300)
+end
+
+--[[
+    @method-name: clear
+    @method-desc: Delete the stored history. A copy on a USB drive is kept under a dated name.
+--]]
+M.clear = function()
+    return run_json({ "clear" }, 120)
+end
+
 -- ------------------------------------------------------------- settings --
 
 local function is_uint(v) return v:match("^%d+$") ~= nil and #v <= 10 end
@@ -124,6 +140,10 @@ local function host_only(v)
     return v:match("^[%w%.:_%-]+$") ~= nil and v:sub(1, 1) ~= "-" and #v <= 253
 end
 
+local function path(v)
+    return v:match("^/[%w%._/%-]*$") ~= nil and not v:find("%.%.") and #v <= 200
+end
+
 local password_ok = text(128)
 
 -- Every setting the panel may change, with the check its value must pass.
@@ -135,6 +155,7 @@ local FIELDS = {
     username = { check = text(64) },
     ping_host = { optional = true, check = host_only },
     history_days = { optional = true, check = range(1, 730) },
+    export_dir = { optional = true, check = function(v) return path(v) and v ~= "/" end },
     -- Printed on the report.
     isp_name = { optional = true, check = text(120) },
     subscriber = { optional = true, check = text(120) },

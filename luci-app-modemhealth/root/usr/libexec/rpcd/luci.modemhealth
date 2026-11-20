@@ -8,7 +8,7 @@
 
 case "$1" in
 	list)
-		echo '{"status":{},"data":{"since":0,"until":0},"check":{},"test":{"host":"str","username":"str","password":"str"},"set_password":{"password":"str"}}'
+		echo '{"status":{},"data":{"since":0,"until":0},"check":{},"test":{"host":"str","username":"str","password":"str"},"set_password":{"password":"str"},"export":{},"clear":{}}'
 		;;
 	call)
 		case "$2" in
@@ -35,6 +35,12 @@ case "$1" in
 				# Through the environment, not the command line, which any
 				# process on the router can read.
 				MH_HOST="$host" MH_USER="$username" MH_PASSWORD="$password" /usr/bin/modemhealth test
+				;;
+			export)
+				/usr/bin/modemhealth export
+				;;
+			clear)
+				/usr/bin/modemhealth clear
 				;;
 			set_password)
 				read -r input

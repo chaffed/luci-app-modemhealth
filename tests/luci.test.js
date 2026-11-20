@@ -279,6 +279,89 @@ async function main() {
 		s = await summary();
 		ok(/Next check at \d\d:\d\d\./.test(s.text) && s.notice === '', 'overview: shows when the next check is due; the note about changed limits is gone');
 
+		/* ---------------------------------------------------- copy on a drive */
+		/* The folder shared with the test router is, to it, a mounted drive. */
+		ok(/can also copy the history and the report to a USB drive/.test(s.text), 'drive: the overview says a copy on a drive is possible');
+		/* With drives to suggest, the field is LuCI's combo box: open it,
+		 * type a folder of one's own, Enter. */
+		var combo = '.cbi-value[data-name="export_dir"] .cbi-dropdown', custom = combo + ' .create-item-input';
+		var setDrive = async function(dir) {
+			await openSettings();
+			await tab('storage');
+			await page.click(combo);
+			await page.fill(custom, dir);
+			await page.press(custom, 'Enter');
+			await apply();
+		};
+		await openSettings();
+		await tab('storage');
+		ok(/Drives found on this router: [^.]*\/out/.test(await page.innerText('#view')), 'drive: Settings lists the drives that are connected');
+		ok((await page.locator(combo + ' li[data-value]').evaluateAll(function(l) { return l.map(function(x) { return x.getAttribute('data-value'); }); })).indexOf('/out/modemhealth') >= 0,
+			'drive: and offers a folder on each of them');
+		await page.click(combo);
+		await page.fill(custom, 'usb stick');
+		await page.press(custom, 'Tab');
+		ok(await page.locator('.cbi-value[data-name="export_dir"] .cbi-input-invalid').count() > 0, 'drive: a folder that is not a full path is refused');
+		await page.keyboard.press('Escape');
+		await setDrive('/tmp/nodrive/modemhealth');
+		await openOverview();
+		ok(/No drive is connected at \/tmp\/nodrive\/modemhealth, so the copy is not being saved\. The history on the router is not affected\./.test(await page.innerText('#mh-drive')),
+			'drive: a folder that is not on a drive is reported, with what that means');
+		await page.click('#mh-drive button');
+		await page.waitForFunction(function() { var b = document.querySelector('#mh-drive button'); return b && !b.disabled; }, null, { timeout: 60000 });
+		eq(router('ls -d /tmp/nodrive 2>&1 | grep -c "No such"').trim(), '1', 'drive: "save now" creates nothing there either');
+
+		await setDrive('/out/drive/modemhealth');
+		await openOverview();
+		ok(/After every check the history is copied to \/out\/drive\/modemhealth\./.test(await page.innerText('#mh-drive')), 'drive: the overview says where the copy goes');
+		await page.click('#mh-drive button');
+		await page.waitForFunction(function() { return /Last saved: \d{4}-/.test((document.getElementById('mh-drive') || {}).textContent || ''); }, null, { timeout: 120000 });
+		var driveDir = path.join(out, 'drive', 'modemhealth');
+		eq(fs.readdirSync(driveDir).sort(), [ 'modemhealth-channels.csv', 'modemhealth-events.csv', 'modemhealth-lineup.csv', 'modemhealth-outages.csv',
+			'modemhealth-readings.csv', 'modemhealth-report.html' ], 'drive: "save now" puts the history and the report on the drive');
+		var onDrive = function(name) { return fs.readFileSync(path.join(driveDir, name), 'utf8'); };
+		var stored = +router('{ gzip -dc /etc/modemhealth/readings/*.gz; cat /etc/modemhealth/readings/*.csv; } | grep -vc ^ts,');
+		eq([ onDrive('modemhealth-readings.csv').split('\n').filter(Boolean).length - 1, onDrive('modemhealth-outages.csv').split('\n').filter(Boolean).length - 1 ],
+			[ stored, 1 ], 'drive: every stored check is in the copy, and the outage in the outages file');
+
+		/* the report file from the drive, on a computer without the router */
+		var off2 = await r.browser.newContext({ offline: true, viewport: { width: 1000, height: 1200 } });
+		var dpage = await off2.newPage(), dreq = [], dprob = [];
+		dpage.on('request', function(q) { dreq.push(q.url()); });
+		dpage.on('pageerror', function(e) { dprob.push(e.message); });
+		dpage.on('console', function(m) { if (m.type() === 'error') dprob.push(m.text()); });
+		await dpage.goto('file://' + path.join(driveDir, 'modemhealth-report.html'));
+		await dpage.waitForSelector('#mh-report h1', { timeout: 60000 });
+		await dpage.waitForFunction(function() { return document.getElementById('mh-status').textContent === ''; }, null, { timeout: 60000 });
+		var dt = await dpage.innerText('#mh-report');
+		eq([ dreq.length, dprob.length ], [ 1, 0 ], 'report file on the drive: opens without the router or the internet and asks for nothing else');
+		ok(/The line had faults in this period\./.test(dt) && /1 outage with no internet connection/.test(dt) && /13 losses of downstream sync/.test(dt) &&
+			new RegExp('Checks made\\s+' + stored + ' checks').test(dt) && /Subscriber\s+Zoë O'Brien <b>/.test(dt) && /00:00:5E:00:53:01/.test(dt),
+			'report file on the drive: draws the same findings, counts and details as the Report page');
+		eq(await dpage.evaluate(function() { return [ window.__xss == null, document.querySelectorAll('#mh-report script, #mh-report img, #mh-report b').length, document.querySelectorAll('#mh-report svg.mh-chart').length ]; }),
+			[ true, 0, 4 ], 'report file on the drive: markup in the history stays text; four charts');
+		await dpage.fill('#mh-notes', 'Written on another computer.');
+		await dpage.press('#mh-notes', 'Tab');
+		await dpage.selectOption('#mh-period', '1');
+		await dpage.waitForFunction(function() { return /Written on another computer\./.test(document.getElementById('mh-report').textContent) && /Checks made\s*2[89]\d checks/.test(document.getElementById('mh-report').textContent); }, null, { timeout: 60000 });
+		ok(true, 'report file on the drive: the period and the statement can be changed there');
+		await dpage.screenshot({ path: path.join(SHOTS, 'drive-report.png') });
+		ok(await dpage.isHidden('#mh-problem').catch(function() { return true; }) && !/Pa ss/.test(onDrive('modemhealth-report.html') + onDrive('modemhealth-readings.csv') + onDrive('modemhealth-events.csv')),
+			'report file on the drive: no modem password in it or in the history files');
+		await off2.close();
+
+		/* ------------------------------------------------------ clear history */
+		await openSettings();
+		await tab('storage');
+		await page.click('button:has-text("Clear history…")');
+		await page.waitForSelector('#modal_overlay .cbi-button-negative, .modal .cbi-button-negative');
+		ok(/cannot be undone/.test(await page.innerText('.modal')), 'clear history: asks first, and says it cannot be undone');
+		await page.click('.modal button:has-text("Clear history")');
+		await page.waitForSelector('text=History cleared.', { timeout: 60000 });
+		var left = +router('{ gzip -dc /etc/modemhealth/readings/*.gz 2>/dev/null; cat /etc/modemhealth/readings/*.csv; } | grep -vc ^ts,; true');
+		var kept = fs.readdirSync(driveDir).filter(function(f) { return /-until-\d{8}-\d{6}\.(csv|html)$/.test(f); });
+		ok(left <= 1 && kept.length === 6, 'clear history: the router\'s history is gone; the six files on the drive are kept under dated names (%s …)'.replace('%s', kept[0]));
+
 		/* ------------------------------------------------------------ secrecy */
 		var seen = (await Promise.all(replies)).join('\n');
 		ok(replies.length > 20 && seen.indexOf('Pa ss') < 0,

@@ -20,6 +20,8 @@ local outputs = {
     data = '{"since":0,"until":9,"readings":"ts,result\\n1,ok\\n","channels":"","events":"","channelmap":""}',
     ["test-input"] = "/var/run/modemhealth/test-input.aBc123\n",
     test = '{"ok":true,"model":"S34","firmware":"fw","downstream":34,"upstream":5}',
+    export = '{"dir":"/tmp/mountd/disk1_part1/modemhealth","mounted":true,"ts":1795000000,"ok":true,"message":""}',
+    clear = '{"cleared":true}',
 }
 
 -- Like the panel's own ngx.pipe (/usr/share/gl-ngx/oui-init.lua): spawn(args,
@@ -132,6 +134,11 @@ ok("a time limit is passed the way the panel expects", spawn_opts[#spawn_opts].s
 local c = M.check()
 ok("check reads the modem, then returns the status", c.scheduler == true and spawned[#spawned - 1][2] == "check" and last_cmd() == "/usr/bin/modemhealth status")
 
+local ex = M.export()
+ok("export saves to the drive and returns the state of the copy", ex.ok == true and ex.mounted == true and last_cmd() == "/usr/bin/modemhealth export", last_cmd())
+ok("export is given five minutes (a first copy of a long history)", spawn_opts[#spawn_opts].stdout_read_timeout == 300000)
+ok("clear clears the history", M.clear().cleared == true and last_cmd() == "/usr/bin/modemhealth clear", last_cmd())
+
 outputs.status = "not json"
 local bad = M.get_status()
 ok("an unreadable answer becomes an error", bad.err_code == -1 and bad.err_msg ~= nil)
@@ -184,6 +191,9 @@ ok("report details with commas, apostrophes and accents are kept",
 r = try({ account = "" })
 ok("an emptied report detail is removed", r.saved and store.modemhealth.main.account == nil)
 
+r = try({ export_dir = "/tmp/mountd/disk1_part1/modemhealth" })
+ok("a folder on a drive is accepted", r.saved and store.modemhealth.main.export_dir == "/tmp/mountd/disk1_part1/modemhealth")
+
 r = try({ interval = "  15  " })
 ok("surrounding spaces are trimmed", r.saved and store.modemhealth.main.interval == "15")
 
@@ -211,6 +221,10 @@ local refused = {
     { "report text over 120 bytes", { isp_name = string.rep("x", 121) }, "isp_name" },
     { "report text with a line break", { subscriber = "A\nB" }, "subscriber" },
     { "report text with a control character", { account = "12\0273" }, "account" },
+    { "drive folder that is the root", { export_dir = "/" }, "export_dir" },
+    { "drive folder with a space", { export_dir = "/mnt/my drive" }, "export_dir" },
+    { "relative drive folder", { export_dir = "usb/modemhealth" }, "export_dir" },
+    { "drive folder going up a folder", { export_dir = "/mnt/../etc" }, "export_dir" },
     { "the password through set_config", { password = "x" }, "password" },
     { "where the history is kept", { data_dir = "/tmp/x" }, "data_dir" },
     { "a table where text belongs", { username = { "x" } }, "username" },
@@ -286,7 +300,7 @@ ok("test without an answer says so", r.ok == false and r.reason == "no_answer")
 
 -- every setting the LuCI page offers can be set from the panel
 local luci = { "enabled", "interval", "host", "username", "ping_host", "history_days",
-    "isp_name", "subscriber", "account", "service_address" }
+    "isp_name", "subscriber", "account", "service_address", "export_dir" }
 local missing, n = {}, 0
 for _, k in ipairs(luci) do if not M.FIELDS[k] then missing[#missing + 1] = k end end
 for _ in pairs(M.FIELDS) do n = n + 1 end
