@@ -20,6 +20,8 @@ var REASONS = {
 	timeout: _('Nothing answered at this address in time. Check the modem address, and that the modem is on and connected to the router\'s WAN port.'),
 	tls_error: _('Could not set up a secure connection to the modem.'),
 	not_a_supported_modem: _('Something answered at this address, but it is not a supported modem (SURFboard S33 or S34).'),
+	not_a_supported_device: _('Something answered at this address, but not like a T-Mobile 5G gateway. Check the address (usually 192.168.12.1) and the modem type.'),
+	bad_reply: _('The modem\'s reply could not be read.'),
 	no_openssl: _('The openssl-util package is missing on the router.')
 };
 
@@ -100,8 +102,16 @@ return view.extend({
 		s.tab('storage', _('Storage'));
 		s.tab('report', _('Report details'));
 
+		o = s.taboption('modem', form.ListValue, 'modem_type', _('Modem'),
+			_('"Detect" uses a SURFboard at 192.168.100.1, and a T-Mobile 5G gateway at another address (usually 192.168.12.1). T-Mobile gateway support is new and not yet tested on a real gateway.'));
+		o.value('auto', _('Detect'));
+		o.value('surfboard', _('SURFboard S33 / S34 cable modem'));
+		o.value('tmobile', _('T-Mobile 5G Home Internet gateway'));
+		o.default = 'auto';
+		o.rmempty = false;
+
 		o = s.taboption('modem', form.Value, 'host', _('Modem address'),
-			_('SURFboard modems answer at 192.168.100.1 through the router\'s WAN port.'));
+			_('SURFboard modems answer at 192.168.100.1 through the router\'s WAN port; T-Mobile 5G gateways at 192.168.12.1 (no password needed).'));
 		o.datatype = 'or(host,hostport)';
 		o.default = '192.168.100.1';
 		o.placeholder = '192.168.100.1';
@@ -137,7 +147,7 @@ return view.extend({
 			return mh.callTest(get('host') || '192.168.100.1', get('username') || 'admin', get('_password') || '').then(function(r) {
 				out.className = r.ok ? 'alert-message success' : 'alert-message warning';
 				out.textContent = r.ok
-					? _('Connected: %s, firmware %s, %d downstream and %d upstream channels.').format(r.model, r.firmware, r.downstream, r.upstream)
+					? (r.type === 'tmobile' ? mh.gatewayText(r) : _('Connected: %s, firmware %s, %d downstream and %d upstream channels.').format(r.model, r.firmware, r.downstream, r.upstream))
 					: reasonText(r.reason);
 			}).catch(function(e) {
 				out.className = 'alert-message warning';

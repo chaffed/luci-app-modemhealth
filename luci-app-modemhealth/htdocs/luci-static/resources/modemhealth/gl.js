@@ -448,8 +448,19 @@
 
 	/* ------------------------------------------------------- settings -- */
 
-	var DEFAULTS = { enabled: '1', interval: '5', host: '192.168.100.1', username: 'admin', ping_host: '1.1.1.1', history_days: '90' };
+	var DEFAULTS = { modem_type: 'auto', enabled: '1', interval: '5', host: '192.168.100.1', username: 'admin', ping_host: '1.1.1.1', history_days: '90' };
 
+	/* Test connection's answer for a T-Mobile gateway. */
+	function gatewayText(r) {
+		var radios = (r.radios || []).map(function(x) {
+			return _('%s %s: RSRP %s dBm, SINR %s dB').format(x.tech === 'nr' ? '5G' : '4G', x.bands || '?',
+				x.rsrp == null ? '?' : x.rsrp, x.sinr == null ? '?' : x.sinr);
+		});
+		return _('Connected: %s, firmware %s (T-Mobile gateway, %s). %s').format(r.model || '?', r.firmware || '?',
+			r.registration || _('registration unknown'), radios.length ? radios.join('; ') + '.' : _('No radio is connected.'));
+	}
+
+	var MODEM_TYPES = [ [ 'auto', _('Detect') ], [ 'surfboard', _('SURFboard S33 / S34 cable modem') ], [ 'tmobile', _('T-Mobile 5G Home Internet gateway') ] ];
 	var INTERVALS = [ [ '1', _('1 minute') ], [ '2', _('2 minutes') ], [ '5', _('5 minutes (recommended)') ],
 		[ '10', _('10 minutes') ], [ '15', _('15 minutes') ] ];
 
@@ -460,6 +471,8 @@
 		timeout: _('Nothing answered at this address in time. Check the modem address, and that the modem is on and connected to the router\'s WAN port.'),
 		tls_error: _('Could not set up a secure connection to the modem.'),
 		not_a_supported_modem: _('Something answered at this address, but it is not a supported modem (SURFboard S33 or S34).'),
+		not_a_supported_device: _('Something answered at this address, but not like a T-Mobile 5G gateway. Check the address (usually 192.168.12.1) and the modem type.'),
+		bad_reply: _('The modem\'s reply could not be read.'),
 		no_openssl: _('The openssl-util package is missing on the router.'),
 		invalid_input: _('The address, user name or password contains characters that cannot be used here.'),
 		http_404: _('The modem answered "not found": it may not be a supported model (SURFboard S33 or S34).')
@@ -495,8 +508,10 @@
 		var drives = st.drives || [];
 		return [
 			[ _('Modem'), [
+				{ key: 'modem_type', type: 'select', label: _('Modem'), options: MODEM_TYPES,
+					help: _('"Detect" uses a SURFboard at 192.168.100.1, and a T-Mobile 5G gateway at another address (usually 192.168.12.1). T-Mobile gateway support is new and not yet tested on a real gateway.') },
 				{ key: 'host', type: 'text', label: _('Modem address'), check: hostOk(true),
-					help: _('SURFboard modems answer at 192.168.100.1 through the router\'s WAN port.') },
+					help: _('SURFboard modems answer at 192.168.100.1 through the router\'s WAN port; T-Mobile 5G gateways at 192.168.12.1 (no password needed).') },
 				{ key: 'username', type: 'text', label: _('User name'), check: textOk(64), help: _('Usually "admin".') },
 				{ key: 'password', type: 'password', label: _('Password'), check: textOk(128),
 					help: st.password_set
@@ -688,7 +703,7 @@
 				return call('test', { host: rows.host.value(), username: rows.username.value(), password: rows.password.value() }, 150).then(function(r) {
 					testOut.className = r.ok ? 'alert-message success' : 'alert-message';
 					testOut.textContent = r.ok
-						? _('Connected: %s, firmware %s, %d downstream and %d upstream channels.').format(r.model, r.firmware, r.downstream, r.upstream)
+						? (r.type === 'tmobile' ? gatewayText(r) : _('Connected: %s, firmware %s, %d downstream and %d upstream channels.').format(r.model, r.firmware, r.downstream, r.upstream))
 						: reasonText(r.reason);
 				}).catch(function(e) {
 					testOut.className = 'alert-message';

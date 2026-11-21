@@ -63,6 +63,9 @@ jobs:
       - name: Test the backend against the fake modem (OpenWrt 23.05 container)
         run: python3 tests/backend.test.py
 
+      - name: Test the backend against fake T-Mobile gateways (OpenWrt 23.05 container)
+        run: python3 tests/backend_gateway.test.py
+
       - name: Test the web interface in LuCI with a browser (OpenWrt 23.05 container)
         run: |
           npm install --no-save playwright-core
