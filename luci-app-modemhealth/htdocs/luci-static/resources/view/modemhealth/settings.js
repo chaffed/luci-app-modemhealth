@@ -221,6 +221,7 @@ return view.extend({
 		/* Automatic restarts (#39): off unless switched on. Kept while
 		 * switched off (retain), so switching off and on keeps them. */
 		var after = function(o) { o.depends('restart_auto', '1'); o.retain = true; return o; };
+		var afterSignal = function(o) { o.depends({ restart_auto: '1', restart_signal: '1' }); o.retain = true; return o; };
 		o = s.taboption('restart', form.Flag, 'restart_auto', _('Restart the modem automatically'),
 			_('Off unless you switch it on. Modem Health then restarts a SURFboard that answers but has lost its connection, as its own Restart button does. Every restart is recorded, and the report tells them apart from restarts the modem made on its own. A restart cannot fix a fault on the line: if restarts keep being needed, the provider has to look at it.'));
 		o.rmempty = false;
@@ -234,23 +235,23 @@ return view.extend({
 			_('Restarts can hide the faults the report is meant to show the provider: use this only if restarts really help your line.')));
 		o.rmempty = false;
 		o.default = '0';
-		o = after(s.taboption('restart', form.Value, 'restart_signal_checks', _('After this many bad checks in a row'),
+		o = afterSignal(s.taboption('restart', form.Value, 'restart_signal_checks', _('After this many bad checks in a row'),
 			_('A check is bad when it shows any of the signs chosen below.')));
 		o.datatype = 'and(uinteger,range(1,100))';
 		o.default = '3';
 		o.placeholder = '3';
-		o = after(s.taboption('restart', form.Flag, 'restart_on_unlocked', _('Sign: a channel not locked')));
+		o = afterSignal(s.taboption('restart', form.Flag, 'restart_on_unlocked', _('Sign: a channel not locked')));
 		o.rmempty = false;
 		o.default = '1';
-		o = after(s.taboption('restart', form.Flag, 'restart_on_out_of_spec', _('Sign: a channel outside the acceptable range'),
+		o = afterSignal(s.taboption('restart', form.Flag, 'restart_on_out_of_spec', _('Sign: a channel outside the acceptable range'),
 			_('Downstream power and SNR/MER and upstream power, against the health limits.')));
 		o.rmempty = false;
 		o.default = '1';
-		o = after(s.taboption('restart', form.Value, 'restart_on_errors', _('Sign: at least this many uncorrectable errors in one check'),
+		o = afterSignal(s.taboption('restart', form.Value, 'restart_on_errors', _('Sign: at least this many uncorrectable errors in one check'),
 			_('Across all channels, since the check before. Empty: not a sign.')));
 		o.datatype = 'and(uinteger,range(1,999999999))';
 		o.rmempty = true;
-		o = after(s.taboption('restart', form.Value, 'restart_on_events', _('Sign: at least this many disruptive log entries in one check'),
+		o = afterSignal(s.taboption('restart', form.Value, 'restart_on_events', _('Sign: at least this many disruptive log entries in one check'),
 			_('T3/T4 time-outs, loss of sync, lost MDD. Empty: not a sign.')));
 		o.datatype = 'and(uinteger,range(1,100))';
 		o.rmempty = true;
