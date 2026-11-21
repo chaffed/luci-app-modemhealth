@@ -199,6 +199,71 @@ exports.make = function(now, days, opts) {
 	return { files: files, counts: counts, times: T, first: stamps[0], last: stamps[stamps.length - 1], ispy: ispy };
 };
 
+exports.RADIOS = 'ts,tech,bands,bars,rsrp_dbm,rsrq_db,rssi_dbm,sinr_db,cell';
+
+/* A T-Mobile 5G gateway's history, in the layout the backend stores for
+ * one (readings/, radios/, events/ and modem.txt; see #28). Invented
+ * values and tower IDs: nobody on the project has a gateway. A 4G and a
+ * 5G radio; a weak spell (5G RSRP below -100, SINR near 0), the 5G radio
+ * lost for half an hour, a move to another tower, an outage, a gateway
+ * restart and a check that got no answer.
+ * makeGateway(now, days, opts) -> { files, counts, times, first, last }
+ * opts.hostile puts markup in the model name and a band. */
+exports.makeGateway = function(now, days, opts) {
+	opts = opts || {};
+	var step = (opts.interval || 5) * 60, seed = 5;
+	var rnd = function() { return (seed = (seed * 16807) % 2147483647) / 2147483647; };
+	var model = opts.hostile ? exports.HOSTILE[2] : 'TMO-G4AR', firmware = '1.00.18';
+	var start = now - days * 86400 + 240, last = now - 200;
+	var T = {
+		weak: [ now - 30 * 3600, now - 30 * 3600 + 5400 ],
+		nr_lost: [ now - 26 * 3600, now - 26 * 3600 + 1800 ],
+		move: now - 22 * 3600,
+		outage: [ now - 20 * 3600, now - 20 * 3600 + 3 * step + 60 ],
+		restart: now - 20 * 3600 + 3 * step + 120,
+		failed: now - 8 * 3600
+	};
+	var files = {}, counts = { readings: 0, failed: 0, restarts: 0, events: 0 };
+	var add = function(name, header, line) { files[name] = (files[name] || header + '\n') + line + '\n'; };
+	var boot = start - 5 * 86400, prev = null, restarted = false, stamps = [];
+	var ev = function(ts, msg) { add('events/' + day(ts) + '.csv', exports.EVENTS, [ ts, '', '', 'Notice', msg ].join(',')); counts.events++; };
+	for (var t = start; t <= last; t += step) {
+		var ts = t + Math.floor(rnd() * 20), r = 'readings/' + day(ts) + '.csv', rf = 'radios/' + day(ts) + '.csv';
+		counts.readings++;
+		stamps.push(ts);
+		if (ts >= T.outage[0] && ts < T.outage[1]) {
+			add(r, exports.READINGS, [ ts, 'failed', 'unreachable', '', '', '', '', '', '', '', '', '', '', '', '', 100, '', 100, '' ].join(','));
+			counts.failed++;
+			continue;
+		}
+		if (Math.abs(ts - T.failed) < step / 2) {
+			add(r, exports.READINGS, [ ts, 'failed', 'timeout', '', '', '', '', '', '', '', '', '', '', '', '', 0, 1.2, 0, 14.3 ].join(','));
+			counts.failed++;
+			continue;
+		}
+		var reboot = 0, bootTs = '';
+		if (!restarted && ts >= T.restart) { restarted = true; boot = ts - 60; reboot = 1; bootTs = boot; counts.restarts++; }
+		var weak = ts >= T.weak[0] && ts < T.weak[1], lost = ts >= T.nr_lost[0] && ts < T.nr_lost[1];
+		var moved = ts >= T.move, jitter = function(a) { return Math.round(a + (rnd() - 0.5) * 4); };
+		var radios = [ [ 'lte', 'b66', 3, jitter(weak ? -104 : -95), jitter(-11), jitter(-70), jitter(weak ? 3 : 11), moved ? '1305522-21' : '1305517-14' ] ];
+		if (!lost)
+			radios.push([ 'nr', opts.hostile && ts > now - 7200 ? exports.HOSTILE[0] : 'n41', weak ? 2 : 4, jitter(weak ? -106 : -88), jitter(weak ? -16 : -10),
+				jitter(-75), jitter(weak ? -1 : 18), moved ? '1407801-102' : '1407755-101' ]);
+		radios.forEach(function(x) { add(rf, exports.RADIOS, [ ts ].concat(x).join(',')); });
+		var cur = {};
+		radios.forEach(function(x) { cur[x[0]] = x[7]; });
+		if (prev) {
+			Object.keys(cur).forEach(function(k) { if (prev[k] && prev[k] !== cur[k]) ev(ts, 'Tower change on ' + (k === 'nr' ? '5G' : '4G') + ': ' + prev[k] + ' to ' + cur[k]); });
+			Object.keys(prev).forEach(function(k) { if (!cur[k]) ev(ts, (k === 'nr' ? '5G' : '4G') + ' radio no longer connected'); });
+		}
+		prev = cur;
+		add(r, exports.READINGS, [ ts, 'ok', '', model, firmware, ts - boot, 'registered', '', 'home', '', '', '', reboot, bootTs, 0,
+			0, (1 + rnd()).toFixed(3), 0, (12 + rnd() * 5).toFixed(3) ].join(','));
+	}
+	files['modem.txt'] = [ 'type=tmobile', 'model=' + model, 'firmware=' + firmware, 'mac=00:00:5E:00:53:02', 'maker=Arcadyan' ].join('\n') + '\n';
+	return { files: files, counts: counts, times: T, first: stamps[0], last: stamps[stamps.length - 1] };
+};
+
 exports.write = function(dir, made) {
 	Object.keys(made.files).forEach(function(name) {
 		fs.mkdirSync(path.dirname(path.join(dir, name)), { recursive: true });

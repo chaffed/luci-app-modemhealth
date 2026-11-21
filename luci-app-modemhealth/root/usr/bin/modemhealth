@@ -1279,6 +1279,7 @@ do_status() {
 	printf '{"version":"%s",' "$VERSION"
 	printf '"enabled":%s,"scheduler":%s,"synced":%s,"next_check":%s,"interval":%s,"now":%s,' \
 		"$(json_bool [ "$ENABLED" = 1 ])" "$sched" "$(json_bool time_synced)" "$(json_num "$next")" "$INTERVAL" "$(date +%s)"
+	printf '"modem_type":%s,' "$(json_str "$MODEM_TYPE")"
 	printf '"password_set":%s,"host":%s,"username":%s,"readings_header":%s,"last":%s,"modem":{' \
 		"$(json_bool [ -n "$PASSWORD" ])" "$(json_str "$HOST")" "$(json_str "$USERNAME")" "$(json_str "$READINGS_HEADER")" "$(json_str "$last")"
 	if [ -s "$DATA_DIR/modem.txt" ]; then

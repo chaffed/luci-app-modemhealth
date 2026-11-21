@@ -44,7 +44,7 @@ function router(made, has) {
 		return header + '\n' + Object.keys(made.files).filter(function(n) { return n.indexOf(kind + '/') === 0; }).sort()
 			.map(function(n) { return made.files[n].split('\n').slice(1).filter(Boolean).join('\n'); }).filter(Boolean).join('\n') + '\n';
 	};
-	var all = { readings: text('readings', gen.READINGS), channels: text('channels', gen.CHANNELS), events: text('events', gen.EVENTS) };
+	var all = { readings: text('readings', gen.READINGS), channels: text('channels', gen.CHANNELS), events: text('events', gen.EVENTS), radios: text('radios', gen.RADIOS) };
 	var calls = 0;
 	var rpc = { declare: function(o) { return function(since, until) {
 		if (o.method !== 'data') return Promise.resolve({});
@@ -53,7 +53,7 @@ function router(made, has) {
 			var l = t.split('\n').filter(Boolean);
 			return [ l[0] ].concat(l.slice(1).filter(function(r) { var ts = +r.split(',')[0]; return ts >= since && ts <= until; })).join('\n') + '\n';
 		};
-		var reply = { readings: cut(all.readings), channels: cut(all.channels), events: cut(all.events), channelmap: made.files['channelmap.csv'] };
+		var reply = { readings: cut(all.readings), channels: cut(all.channels), events: cut(all.events), radios: cut(all.radios), channelmap: made.files['channelmap.csv'] || '' };
 		if (has.ispy) {
 			/* What the backend passes on of ISPy's file: these columns, without the skipped tests. */
 			var rows = made.ispy.results.split('\n').slice(1).filter(Boolean).map(function(l) { return l.split(','); })
@@ -336,7 +336,51 @@ async function main() {
 	ok(found > 80 && sources.length >= 7, 'formatted strings were found to check (%d in %d files)'.replace('%d', found).replace('%d', sources.length));
 }
 
-main().catch(function(e) { fail++; console.log('FAIL ' + (e.stack || e)); }).then(function() {
+/* A T-Mobile 5G gateway's history (synthetic: gen.makeGateway). */
+async function gatewayTests() {
+	var made = gen.makeGateway(NOW, 5, { hostile: true }), g = router(made), T = made.times;
+	var G = await g.mh.loadDigest(NOW - 5 * 86400, NOW, 5);
+	var GW_MODEM = { type: 'tmobile', model: 'TMO-G4AR', firmware: '1.00.18', mac: '00:00:5E:00:53:02' };
+	var rep = g.rb.build(G, { modem: GW_MODEM, generated: NOW, ping_host: '1.1.1.1' }), t = text(rep.body);
+	ok(G.gateway === true && Object.keys(G.radios).sort().join() === 'lte,nr', 'gateway: the digest knows it is a gateway, with a 4G and a 5G radio');
+	ok(/^5G home internet line health report/.test(t.trim()) && /measured at the customer's 5G gateway/.test(t) && t.indexOf('Cable line') < 0,
+		'gateway report: says it is about a 5G gateway, not a cable modem');
+	ok(/2 tower changes \(0\.4 a day on average\), seen at the checks\./.test(t), 'gateway report: counts the tower changes (one move, both radios)');
+	ok(/1 lost 4G or 5G connection/.test(t) && /The gateway restarted 1 time\./.test(t) && /1 outage with no internet connection/.test(t),
+		'gateway report: the lost 5G radio, the restart and the outage');
+	ok(/found the signal below the acceptable range, or no radio connected/.test(t), 'gateway report: the weak spell counts as below the acceptable range');
+	var limits = /Limits the values were judged against([\s\S]*?)A value within/.exec(t)[1];
+	ok(/4G \(LTE\) signal power, RSRP/.test(limits) && /5G \(NR\) signal to noise, SS-SINR/.test(limits) && /Tower changes/.test(limits) &&
+		!/Downstream power|T3 time-outs|Losses of downstream sync|Every channel locked/.test(limits),
+		'gateway report: its limits table has the 4G/5G limits and none of the cable modem\'s');
+	ok(/Teltonika Networks wiki/.test(t) && /3GPP TS 38\.133/.test(t) && !/CableLabs/.test(t), 'gateway report: cites Teltonika and 3GPP, not DOCSIS');
+	ok(/neither 3GPP nor T-Mobile publishes/i.test(t) && /No published standard grades these signal values/.test(t),
+		'gateway report: says plainly that the grades are vendor guidance');
+	ok(/4G \(LTE\) b66/.test(t) && /5G \(NR\)/.test(t) && /Towers seen/.test(t), 'gateway report: a row per radio with bands and towers seen');
+	ok(/Signal power, RSRP \(dBm\)/.test(t) && (rep.body.match(/<svg/g) || []).length >= 3, 'gateway report: RSRP, SINR and RSRQ charts');
+	ok(rep.body.indexOf('<img src=x') < 0 && rep.body.indexOf('<script>window') < 0 && t.indexOf('<img src=x onerror') >= 0,
+		'gateway report: markup in a band or the model is shown as text, never as markup');
+	ok(!/Uncorrectable/.test(t) && !/T3/.test(t.replace(/\(LTE\)/g, '')), 'gateway report: no cable-only columns (uncorrectable, T3)');
+	ok(/Day by day[\s\S]*Tower changes[\s\S]*Lost 4G\/5G/.test(t), 'gateway report: the day table counts tower changes and lost radios');
+
+	/* The digest and the whole period judge the same. */
+	var D = await g.mh.load(NOW - 5 * 86400, NOW, 5);
+	g.mh.analyse(D, 5);
+	var levels = function(rs) { return rs.map(function(r) { return r.verdict.level; }).join(''); };
+	ok(D.gateway === true && levels(D.readings) === levels(G.readings), 'gateway: loaded whole or as a digest, every reading gets the same verdict');
+	var weak = D.readings.filter(function(r) { return +r.ts >= T.weak[0] && +r.ts < T.weak[1] && r.result === 'ok'; });
+	ok(weak.length && weak.every(function(r) { return r.verdict.level === 'failing'; }) &&
+		weak[0].verdict.reasons.some(function(x) { return x.kind === 'nr_rsrp'; }), 'gateway: the weak spell fails on 5G RSRP');
+	eq(D.radios.length > 0 && g.mh.toCSV(D, 'radios').split('\r\n')[0], 'time,ts,tech,bands,bars,rsrp_dbm,rsrq_db,rssi_dbm,sinr_db,cell', 'gateway: the radios download as CSV');
+
+	/* A cable modem's report is unchanged by all this. */
+	var cm = gen.make(NOW, 3, {}), c = router(cm), ct = text(c.rb.build(await c.mh.loadDigest(NOW - 3 * 86400, NOW, 5), { modem: MODEM }).body);
+	var climits = /Limits the values were judged against([\s\S]*?)A value within/.exec(ct)[1];
+	ok(/^Cable line health report/.test(ct.trim()) && !/RSRP|Teltonika|Tower changes|3GPP/.test(climits) && /Every channel locked/.test(climits),
+		'cable report: no 4G/5G limit or source in its limits table');
+}
+
+main().then(gatewayTests).catch(function(e) { fail++; console.log('FAIL ' + (e.stack || e)); }).then(function() {
 	console.log(fail ? '\n' + fail + ' check(s) failed' : '\nall checks passed');
 	process.exit(fail ? 1 : 0);
 });
