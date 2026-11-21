@@ -146,6 +146,8 @@ end
 
 local password_ok = text(128)
 
+local function flag(v) return v == "0" or v == "1" end
+
 -- Every setting the panel may change, with the check its value must pass.
 -- "optional" settings are removed when left empty (the default applies).
 local FIELDS = {
@@ -157,6 +159,17 @@ local FIELDS = {
     ping_host = { optional = true, check = host_only },
     history_days = { optional = true, check = range(1, 730) },
     export_dir = { optional = true, check = function(v) return path(v) and v ~= "/" end },
+    -- Automatic restarts (#39).
+    restart_auto = { check = flag },
+    restart_down_min = { check = range(1, 240) },
+    restart_signal = { check = flag },
+    restart_signal_checks = { check = range(1, 100) },
+    restart_on_unlocked = { check = flag },
+    restart_on_out_of_spec = { check = flag },
+    restart_on_errors = { optional = true, check = range(1, 999999999) },
+    restart_on_events = { optional = true, check = range(1, 100) },
+    restart_max_hour = { check = range(0, 10) },
+    restart_max_day = { check = range(0, 48) },
     -- Printed on the report.
     isp_name = { optional = true, check = text(120) },
     subscriber = { optional = true, check = text(120) },

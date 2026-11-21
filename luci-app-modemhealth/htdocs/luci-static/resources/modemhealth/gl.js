@@ -448,7 +448,9 @@
 
 	/* ------------------------------------------------------- settings -- */
 
-	var DEFAULTS = { modem_type: 'auto', enabled: '1', interval: '5', host: '192.168.100.1', username: 'admin', ping_host: '1.1.1.1', history_days: '90' };
+	var DEFAULTS = { modem_type: 'auto', enabled: '1', interval: '5', host: '192.168.100.1', username: 'admin', ping_host: '1.1.1.1', history_days: '90',
+		restart_auto: '0', restart_down_min: '10', restart_signal: '0', restart_signal_checks: '3', restart_on_unlocked: '1', restart_on_out_of_spec: '1',
+		restart_max_hour: '1', restart_max_day: '3' };
 
 	/* Test connection's answer for a T-Mobile gateway. */
 	function gatewayText(r) {
@@ -533,6 +535,26 @@
 					help: _('After every check the new rows of the history are added to CSV files in this folder, and once a day the report is saved there as one file that opens in any browser. The router keeps its own copy; while the drive is unplugged the copy is skipped and caught up later. The report file includes the report details. Leave empty to switch this off.') + ' ' +
 						(drives.length ? _('Drives found on this router: %s.').format(drives.join(', '))
 							: _('No attached drive is found at the moment; plug one in and open this page again.')) }
+			] ],
+			[ _('Restarts'), [
+				{ key: 'restart_auto', type: 'flag', label: _('Restart the modem automatically'),
+					help: _('Off unless you switch it on. Modem Health then restarts a SURFboard that answers but has lost its connection, as its own Restart button does. Every restart is recorded, and the report tells them apart from restarts the modem made on its own. A restart cannot fix a fault on the line: if restarts keep being needed, the provider has to look at it.') },
+				{ key: 'restart_down_min', type: 'int', min: 1, max: 240, label: _('After no connection for (minutes)'),
+					help: _('No connection: no answer from the internet host, the modem not "Operational", or no downstream channel locked, while the modem itself answers.') },
+				{ key: 'restart_signal', type: 'flag', label: _('Also restart after bad signal'),
+					help: _('Restarts can hide the faults the report is meant to show the provider: use this only if restarts really help your line.') },
+				{ key: 'restart_signal_checks', type: 'int', min: 1, max: 100, label: _('After this many bad checks in a row'),
+					help: _('A check is bad when it shows any of the signs chosen below.') },
+				{ key: 'restart_on_unlocked', type: 'flag', label: _('Sign: a channel not locked') },
+				{ key: 'restart_on_out_of_spec', type: 'flag', label: _('Sign: a channel outside the acceptable range'),
+					help: _('Downstream power and SNR/MER and upstream power, against the health limits.') },
+				{ key: 'restart_on_errors', type: 'int', min: 1, max: 999999999, optional: true, label: _('Sign: at least this many uncorrectable errors in one check'),
+					help: _('Across all channels, since the check before. Empty: not a sign.') },
+				{ key: 'restart_on_events', type: 'int', min: 1, max: 100, optional: true, label: _('Sign: at least this many disruptive log entries in one check'),
+					help: _('T3/T4 time-outs, loss of sync, lost MDD. Empty: not a sign.') },
+				{ key: 'restart_max_hour', type: 'int', min: 0, max: 10, label: _('At most this many automatic restarts an hour'),
+					help: _('Over a limit Modem Health stops restarting, and the Overview says so. Nothing is counted for 15 minutes after a restart, while the modem comes back.') },
+				{ key: 'restart_max_day', type: 'int', min: 0, max: 48, label: _('At most this many automatic restarts a day') }
 			] ],
 			[ _('Report details'), [
 				{ key: 'isp_name', type: 'text', optional: true, label: _('Provider'), check: textOk(120),

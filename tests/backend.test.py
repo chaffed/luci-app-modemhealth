@@ -83,6 +83,7 @@ def run_in_openwrt(out, scenarios):
             f.write(cfg)
         script += [
             "rm -rf /var/run/modemhealth",  # each scenario starts without a session
+            "uci revert modemhealth 2>/dev/null",  # nor with settings staged by the one before
             "mkdir -p /out/%s" % name,
             "cp /out/%s.uci /etc/config/modemhealth" % name,
             before,
@@ -185,6 +186,23 @@ def main():
         CTL = "curl -sk \"https://modem:%d/_control/set?%%s\" >/dev/null" % PORT
         with open(os.path.join(out, "pw"), "w") as f:
             f.write(PASSWORD)
+        # The shared signal fixture, as channel rows and limit settings, for
+        # the backend's own judgement (signal_signs).
+        signal_cases = json.load(open(os.path.join(ROOT, "tests", "fixtures", "restart", "signal.json")))["cases"]
+        sig_script = ["MODEMHEALTH_LIB=1 . /usr/bin/modemhealth; load_config; uci set modemhealth.limits=limits"]
+        for i, c in enumerate(signal_cases):
+            with open(os.path.join(out, "signal_%d.csv" % i), "w") as f:
+                for j, ch in enumerate(c["channels"]):
+                    f.write("1,%s,%d,%s,%s,%d,0,0,%s,%s,,\n" % (ch["dir"], j + 1, ch["lock"], ch["modulation"], j + 1, ch["power_dbmv"], ch["snr_db"]))
+            sig_script.append("for o in $(uci -q show modemhealth.limits | sed -n 's/^modemhealth\\.limits\\.\\([a-z0-9_]*\\)=.*/\\1/p'); do uci delete modemhealth.limits.$o; done")
+            sig_script += ["uci set modemhealth.limits.%s=%s" % (k, v) for k, v in c.get("limits", {}).items()]
+            sig_script.append("signal_signs < /out/signal_%d.csv" % i)
+        with open(os.path.join(out, "signal.sh"), "w") as f:
+            f.write("\n".join(sig_script) + "\n")
+        AUTO = "uci set modemhealth.main.restart_auto=1; "
+        # Down since 11 minutes ago, as the kept state says (no waiting).
+        DOWN11 = "mkdir -p /var/run/modemhealth; echo \"$(( $(date +%s) - 660 )) 0\" > /var/run/modemhealth/auto; "
+        SEED = "mkdir -p /out/{0}/data; printf 'ts,trigger,result,detail,fail_reason\\n' > /out/{0}/data/restarts.csv; for a in {1}; do echo \"$(( $(date +%s) - a )),down,ok,seeded,\" >> /out/{0}/data/restarts.csv; done; "
         run_in_openwrt(out, [
             ("good", config(host, PASSWORD, "/out/good/data"), ":"),
             ("wrong_password", config(host, PASSWORD + "x", "/out/wrong_password/data"), ":"),
@@ -361,6 +379,33 @@ def main():
              "modemhealth check >/dev/null; modemhealth check > /out/restart_with_check/check.txt 2>&1 & echo $! > /tmp/cpid",
              "wait $(cat /tmp/cpid) 2>/dev/null; sleep 1",
              "modemhealth restart"),
+            # Automatic restarts (#41).
+            ("signal_signs", config(host, PASSWORD, "/out/signal_signs/data"), ":", ":", "sh /out/signal.sh"),
+            ("auto_down", config(host, PASSWORD, "/out/auto_down/data", ping_host="nonexistent.invalid"),
+             AUTO + "modemhealth check >/dev/null; " + DOWN11, "modemhealth status > /out/auto_down/status.json"),
+            ("auto_off", config(host, PASSWORD, "/out/auto_off/data", ping_host="nonexistent.invalid"),
+             "modemhealth check >/dev/null; " + DOWN11),
+            ("auto_first", config(host, PASSWORD, "/out/auto_first/data", ping_host="nonexistent.invalid"), AUTO),
+            ("auto_hour", config(host, PASSWORD, "/out/auto_hour/data", ping_host="nonexistent.invalid"),
+             AUTO + SEED.format("auto_hour", "1200") + "modemhealth check >/dev/null; " + DOWN11,
+             "modemhealth status > /out/auto_hour/status.json; logread 2>/dev/null | grep -c 'limited to' > /out/auto_hour/logged || true"),
+            ("auto_day", config(host, PASSWORD, "/out/auto_day/data", ping_host="nonexistent.invalid"),
+             AUTO + SEED.format("auto_day", "4000 30000 60000") + "modemhealth check >/dev/null; " + DOWN11),
+            ("auto_day_manual", config(host, PASSWORD, "/out/auto_day_manual/data", ping_host="nonexistent.invalid"),
+             AUTO + SEED.format("auto_day_manual", "4000 30000 60000") + "sed -i 's/,down,/,manual,/' /out/auto_day_manual/data/restarts.csv; "
+             "modemhealth check >/dev/null; " + DOWN11),
+            ("auto_settle", config(host, PASSWORD, "/out/auto_settle/data", ping_host="nonexistent.invalid"),
+             AUTO + SEED.format("auto_settle", "300") + "modemhealth check >/dev/null; " + DOWN11,
+             "ls /var/run/modemhealth > /out/auto_settle/run_ls"),
+            ("auto_signal", config(host, PASSWORD, "/out/auto_signal/data"),
+             AUTO + "uci set modemhealth.main.restart_signal=1; uci set modemhealth.main.restart_signal_checks=2; "
+             + CTL % "unlock=25" + "; modemhealth check > /out/auto_signal/first.txt"),
+            ("auto_signal_off", config(host, PASSWORD, "/out/auto_signal_off/data"),
+             AUTO + "uci set modemhealth.main.restart_signal_checks=1; " + CTL % "unlock=25" + "; modemhealth check >/dev/null"),
+            ("auto_events", config(host, PASSWORD, "/out/auto_events/data"),
+             AUTO + "uci set modemhealth.main.restart_signal=1; uci set modemhealth.main.restart_signal_checks=1; "
+             "uci set modemhealth.main.restart_on_unlocked=0; uci set modemhealth.main.restart_on_out_of_spec=0; "
+             "uci set modemhealth.main.restart_on_events=3; modemhealth check > /out/auto_events/first.txt; " + CTL % "new_events=5"),
             ("daemon", config(host, PASSWORD, "/out/daemon/data"),
              "mkdir -p /var/state; touch /var/state/dnsmasqsec",
              "pgrep -f 'modemhealth daemon' > /out/daemon/left_running || true",
@@ -783,6 +828,56 @@ def main():
         check(res.get("ok") is True and state["stale_timestamps"] == 0 and state["reboots"] == 1
               and open(os.path.join(out, "restart_with_check", "check.txt")).read().startswith("ok"),
               "restart during a check: they take turns, and both succeed (%s)" % state)
+
+        # ------------------------------------------------- automatic restarts
+        got = [l.split() for l in open(os.path.join(out, "signal_signs", "output.txt")).read().split("\n") if l.strip()]
+        for c, g in zip(signal_cases, got):
+            check([int(x) for x in g] == c["expect"], "backend signal signs, as health.js: %s (got %s)" % (c["name"], g))
+        check(len(got) == len(signal_cases), "backend signal signs: every fixture case answered (%d of %d)" % (len(got), len(signal_cases)))
+
+        def output_of(name):
+            return open(os.path.join(out, name, "output.txt")).read()
+
+        state, _ = scenario("auto_down")
+        rs = restarts_of("auto_down")
+        check(state["reboots"] == 1 and rs and rs[0]["trigger"] == "down"
+              and rs[0]["detail"] == "no connection for 11 minutes (no answer from nonexistent.invalid)",
+              "auto: no connection for longer than the setting: restarted, and why is recorded (%s)" % rs)
+        check("restarted the modem (no connection for 11 minutes" in output_of("auto_down"), "auto: the check says it restarted the modem")
+        st = json.load(open(os.path.join(out, "auto_down", "status.json")))["restart"]
+        check(st["auto"] is True and st["last"]["trigger"] == "down" and st["last"]["result"] == "ok" and st["auto_last_day"] == 1 and st["held"] is None,
+              "auto: the status shows the last restart (%s)" % st)
+        state, _ = scenario("auto_off")
+        check(state["reboots"] == 0 and not restarts_of("auto_off"), "auto: off by default, nothing restarted")
+        state, _ = scenario("auto_first")
+        check(state["reboots"] == 0, "auto: one check without connection is not enough")
+
+        state, _ = scenario("auto_hour")
+        st = json.load(open(os.path.join(out, "auto_hour", "status.json")))["restart"]
+        check(state["reboots"] == 0 and len(restarts_of("auto_hour")) == 1 and st["held"] and st["held"]["limit"] == "at most 1 an hour"
+              and st["held"]["trigger"] == "down", "auto: one restart 20 minutes ago: held by the hourly limit, and the status says so (%s)" % st["held"])
+        check("restart held (at most 1 an hour)" in output_of("auto_hour"), "auto: the check says the restart was held")
+        state, _ = scenario("auto_day")
+        check(state["reboots"] == 0 and "restart held (at most 3 a day)" in output_of("auto_day"), "auto: three today: held by the daily limit")
+        state, _ = scenario("auto_day_manual")
+        check(state["reboots"] == 1, "auto: restarts asked for by hand do not count toward the limits")
+        state, _ = scenario("auto_settle")
+        check(state["reboots"] == 0 and "auto" not in open(os.path.join(out, "auto_settle", "run_ls")).read().split(),
+              "auto: nothing counts in the 15 minutes after a restart")
+
+        state, _ = scenario("auto_signal")
+        rs = restarts_of("auto_signal")
+        check("restarted" not in open(os.path.join(out, "auto_signal", "first.txt")).read() and state["reboots"] == 1 and rs
+              and rs[0]["trigger"] == "signal" and rs[0]["detail"] == "bad signal in 2 checks in a row (1 channel(s) not locked)",
+              "auto: a channel unlocked in 2 checks in a row: restarted on the second (%s)" % rs)
+        state, _ = scenario("auto_signal_off")
+        check(state["reboots"] == 0, "auto: bad signal is no reason unless that is switched on too")
+        state, _ = scenario("auto_events")
+        rs = restarts_of("auto_events")
+        check("restarted" not in open(os.path.join(out, "auto_events", "first.txt")).read(),
+              "auto: the first check's whole log (many loss-of-sync entries) is not counted as new")
+        check(state["reboots"] == 1 and rs and rs[0]["detail"] == "bad signal in 1 checks in a row (5 disruptive log entries)",
+              "auto: 5 new loss-of-sync entries in one check, at least 3 set: restarted (%s)" % rs)
 
         # ----------------------------------------------------------- secrecy
         for name in ("good", "wrong_password", "unreachable", "restart_manual", "restart_refused"):

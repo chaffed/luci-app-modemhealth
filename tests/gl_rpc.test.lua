@@ -300,7 +300,9 @@ ok("test without an answer says so", r.ok == false and r.reason == "no_answer")
 
 -- every setting the LuCI page offers can be set from the panel
 local luci = { "enabled", "modem_type", "interval", "host", "username", "ping_host", "history_days",
-    "isp_name", "subscriber", "account", "service_address", "export_dir" }
+    "isp_name", "subscriber", "account", "service_address", "export_dir",
+    "restart_auto", "restart_down_min", "restart_signal", "restart_signal_checks", "restart_on_unlocked",
+    "restart_on_out_of_spec", "restart_on_errors", "restart_on_events", "restart_max_hour", "restart_max_day" }
 local missing, n = {}, 0
 for _, k in ipairs(luci) do if not M.FIELDS[k] then missing[#missing + 1] = k end end
 for _ in pairs(M.FIELDS) do n = n + 1 end

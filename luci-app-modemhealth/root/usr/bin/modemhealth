@@ -80,6 +80,19 @@ load_config() {
 	EXPORT_DIR=$(uci -q get "$CONFIG.main.export_dir")
 	MODEM_TYPE=$(uci -q get "$CONFIG.main.modem_type")
 	case $MODEM_TYPE in surfboard|tmobile) ;; *) MODEM_TYPE=auto ;; esac
+	# Automatic restarts (see auto_restart); off unless restart_auto is 1.
+	RESTART_AUTO=$(uci -q get "$CONFIG.main.restart_auto"); [ "$RESTART_AUTO" = 1 ] || RESTART_AUTO=0
+	RESTART_DOWN_MIN=$(int_or "$(uci -q get "$CONFIG.main.restart_down_min")" 10)
+	[ "$RESTART_DOWN_MIN" -ge 1 ] || RESTART_DOWN_MIN=1
+	RESTART_SIGNAL=$(uci -q get "$CONFIG.main.restart_signal"); [ "$RESTART_SIGNAL" = 1 ] || RESTART_SIGNAL=0
+	RESTART_SIGNAL_CHECKS=$(int_or "$(uci -q get "$CONFIG.main.restart_signal_checks")" 3)
+	[ "$RESTART_SIGNAL_CHECKS" -ge 1 ] || RESTART_SIGNAL_CHECKS=1
+	RESTART_ON_UNLOCKED=$(uci -q get "$CONFIG.main.restart_on_unlocked"); [ "$RESTART_ON_UNLOCKED" = 0 ] || RESTART_ON_UNLOCKED=1
+	RESTART_ON_OUT_OF_SPEC=$(uci -q get "$CONFIG.main.restart_on_out_of_spec"); [ "$RESTART_ON_OUT_OF_SPEC" = 0 ] || RESTART_ON_OUT_OF_SPEC=1
+	RESTART_ON_ERRORS=$(int_or "$(uci -q get "$CONFIG.main.restart_on_errors")" "")
+	RESTART_ON_EVENTS=$(int_or "$(uci -q get "$CONFIG.main.restart_on_events")" "")
+	RESTART_MAX_HOUR=$(int_or "$(uci -q get "$CONFIG.main.restart_max_hour")" 1)
+	RESTART_MAX_DAY=$(int_or "$(uci -q get "$CONFIG.main.restart_max_day")" 3)
 	BASE="https://$HOST"
 }
 
@@ -1049,8 +1062,13 @@ gw_check() {
 		echo "maker=$(clean "$(gw_field '.device.manufacturer')")"
 	} > "$DATA_DIR/modem.txt.new" && mv -f "$DATA_DIR/modem.txt.new" "$DATA_DIR/modem.txt"
 	rm -f "$RUN_DIR/gateway.json"
+	AUTO_MSG=
+	if [ "$RESTART_AUTO" = 1 ]; then
+		gateway_signs "$registration" "$n"
+		auto_restart "$ts"
+	fi
 	export_now
-	echo "ok: $model, $n radio(s), ${registration:-registration unknown}, up ${uptime:-?}s${changes:+, $changes}$([ $reboot = 1 ] && echo ', restarted since the last check')"
+	echo "ok: $model, $n radio(s), ${registration:-registration unknown}, up ${uptime:-?}s${changes:+, $changes}$([ $reboot = 1 ] && echo ', restarted since the last check')${AUTO_MSG:+, $AUTO_MSG}"
 }
 
 # Store the radios of a good check, and an event for each tower or band
@@ -1089,7 +1107,7 @@ gw_store_radios() {
 }
 
 do_check() {
-	local ts rows ds us ds_n us_n uptime model firmware reboot=0 boot_ts="" modem_time offset new_events
+	local ts rows ds us ds_n us_n uptime model firmware reboot=0 boot_ts="" modem_time offset new_events conn
 	load_config
 	mkdir -p "$RUN_DIR" && chmod 700 "$RUN_DIR"
 	ensure_store || { log "cannot write to $DATA_DIR"; return 1; }
@@ -1124,6 +1142,7 @@ do_check() {
 	model=$(clean "$(status_field GetCustomerStatusSoftware StatusSoftwareModelName)")
 	firmware=$(clean "$(status_field GetCustomerStatusSoftware StatusSoftwareSfVer)")
 
+	PREV_GOOD=; read_last && PREV_GOOD=$PREV_TS
 	# A restart: the modem has been up for less time than has passed since
 	# the previous good check (two minutes' grace for clock jitter).
 	if [ -n "$uptime" ] && read_last && [ "$ts" -ge "$PREV_TS" ] \
@@ -1136,11 +1155,12 @@ do_check() {
 	modem_time=$(clean "$(status_field GetCustomerStatusConnectionInfo CustomerCurSystemTime)")
 	offset=$(clock_offset "$ts" "$modem_time")
 	new_events=$(store_events "$ts" "$(status_field GetCustomerStatusLog CustomerStatusLogList)" "$offset")
+	conn=$(clean "$(status_field GetCustomerStatusStartupSequence CustomerConnConnectivityComment)")
 
 	echo "$ts ${uptime:-0}" > "$DATA_DIR/last.new"
 	[ -n "$rows" ] && store_channels "$ts" "$reboot" "$rows"
 	mv -f "$DATA_DIR/last.new" "$DATA_DIR/last"
-	echo "$ts,ok,,$model,$firmware,$uptime,$(clean "$(status_field GetCustomerStatusStartupSequence CustomerConnConnectivityComment)"),$(clean "$(status_field GetCustomerStatusStartupSequence CustomerConnBootComment)"),$(clean "$(status_field GetCustomerStatusConnectionInfo CustomerConnNetworkAccess)"),$modem_time,$ds_n,$us_n,$reboot,$boot_ts,$offset,$PINGS" >> "$READINGS"
+	echo "$ts,ok,,$model,$firmware,$uptime,$conn,$(clean "$(status_field GetCustomerStatusStartupSequence CustomerConnBootComment)"),$(clean "$(status_field GetCustomerStatusConnectionInfo CustomerConnNetworkAccess)"),$modem_time,$ds_n,$us_n,$reboot,$boot_ts,$offset,$PINGS" >> "$READINGS"
 
 	# What identifies the modem to the ISP; overwritten on every good reading.
 	{
@@ -1152,8 +1172,13 @@ do_check() {
 	} > "$DATA_DIR/modem.txt.new" && mv -f "$DATA_DIR/modem.txt.new" "$DATA_DIR/modem.txt"
 
 	rm -f "$RUN_DIR/status.json"
+	AUTO_MSG=
+	if [ "$RESTART_AUTO" = 1 ]; then
+		cable_signs "$ts" "$rows" "$conn"
+		auto_restart "$ts"
+	fi
 	export_now
-	echo "ok: $model, $ds_n downstream and $us_n upstream channels, up ${uptime}s, ${new_events:-0} new events$([ $reboot = 1 ] && echo ', restarted since the last check')"
+	echo "ok: $model, $ds_n downstream and $us_n upstream channels, up ${uptime}s, ${new_events:-0} new events$([ $reboot = 1 ] && echo ', restarted since the last check')${AUTO_MSG:+, $AUTO_MSG}"
 }
 
 # ------------------------------------------------------------------- restart
@@ -1198,6 +1223,219 @@ restart_modem() {
 	log "could not restart the modem: $FAIL_REASON"
 	printf '{"ok":false,"device":%s,"reason":%s}\n' "$(json_str "$DEVICE")" "$(json_str "$FAIL_REASON")"
 	return 1
+}
+
+# --------------------------------------------------------- automatic restarts
+#
+# After each good check, with restart_auto on: restart the modem when it
+# has answered but had no connection for restart_down_min minutes, or
+# (with restart_signal on) when restart_signal_checks checks in a row had
+# a chosen sign of bad signal. At most restart_max_hour automatic restarts
+# an hour and restart_max_day a day; over a limit nothing is done, and the
+# status says so. Nothing counts for RESTART_SETTLE seconds after any
+# restart, while the modem comes back. Only a check that read the modem
+# counts: a modem that does not answer cannot be restarted from here.
+RESTART_SETTLE=900
+
+# The good and acceptable ("marginal" in health.js) ranges of each cable
+# signal limit: key, good min and max, acceptable min and max, "-" for no
+# bound. As in health.js, a value is out of range when it is in neither.
+# tests/health.test.js holds this table to health.js. The settings
+# <key>_good_min ... <key>_acceptable_max in the limits section replace a
+# bound, as on the pages.
+ACCEPTABLE='ds_power -7 7 -15 15
+ds_snr 33 - 30 -
+ds_snr_low_power 36 - 33 -
+ds_power_ofdm -7 7 -15 15
+ds_mer_ofdm 41 - 34 -
+us_power_1 38 48 23 57
+us_power_2 38 48 23 54
+us_power_3 38 48 23 51
+us_power_4 38 48 23 51
+us_power_ofdma - 48 - 65'
+# Below this downstream power, ds_snr_low_power applies (health.js).
+LOW_POWER_BELOW=-6
+
+is_number() { printf '%s' "$1" | grep -Eq '^-?[0-9]+(\.[0-9]+)?$'; }
+
+acceptable_limits() {
+	local key glo ghi lo hi
+	printf '%s\n' "$ACCEPTABLE" | while read -r key glo ghi lo hi; do
+		echo "$key $(bound "$key" good_min "$glo") $(bound "$key" good_max "$ghi") $(bound "$key" acceptable_min "$lo") $(bound "$key" acceptable_max "$hi")"
+	done
+}
+
+bound() { # $1=key $2=bound $3=default -> the setting, if it is a number and the default has this bound
+	local v
+	v=$(uci -q get "$CONFIG.limits.$1_$2")
+	if [ "$3" != - ] && is_number "$v"; then echo "$v"; else echo "$3"; fi
+}
+
+# signal_signs: channel rows (ts,dir,ch,lock,modulation,channel_id,freq,
+# width,power,snr,...) on stdin -> "UNLOCKED OUT_OF_RANGE DS_LOCKED": the
+# channels not locked, the channels with power or SNR/MER outside the
+# acceptable range (those health.js channelVerdict judges "bad" on power
+# or SNR), and the downstream channels locked.
+signal_signs() {
+	awk -F, -v lim="$(acceptable_limits)" -v lowp="$LOW_POWER_BELOW" '
+		function within(v, a, b) { return (a == "-" || v + 0 >= a + 0) && (b == "-" || v + 0 <= b + 0) }
+		function out(v, k) { return v != "" && !within(v, glo[k], ghi[k]) && !within(v, lo[k], hi[k]) }
+		BEGIN {
+			n = split(lim, L, "\n")
+			for (i = 1; i <= n; i++) { split(L[i], f, " "); glo[f[1]] = f[2]; ghi[f[1]] = f[3]; lo[f[1]] = f[4]; hi[f[1]] = f[5] }
+		}
+		NF >= 10 { row[++rows] = $0; if ($2 == "us" && toupper($5) !~ /OFDM/) nus++ }
+		END {
+			nus = nus < 1 ? 1 : (nus > 4 ? 4 : nus)
+			for (i = 1; i <= rows; i++) {
+				split(row[i], c, ",")
+				locked = c[4] == "" || tolower(c[4]) == "locked"
+				if (!locked) unlocked++
+				else if (c[2] == "ds") dslocked++
+				ofdm = toupper(c[5]) ~ /OFDM/
+				if (c[2] == "ds") {
+					kp = ofdm ? "ds_power_ofdm" : "ds_power"
+					ks = ofdm ? "ds_mer_ofdm" : (c[9] != "" && c[9] + 0 < lowp ? "ds_snr_low_power" : "ds_snr")
+				} else {
+					kp = ofdm ? "us_power_ofdma" : "us_power_" nus
+					ks = ""
+				}
+				if (out(c[9], kp) || (ks != "" && out(c[10], ks))) bad++
+			}
+			printf "%d %d %d\n", unlocked, bad, dslocked
+		}'
+}
+
+# The modem log entries first seen at TS that mean the connection was
+# disrupted (health.js DISRUPTIVE: T2/T3/T4/T6 time-outs, loss of sync,
+# lost MDD).
+disruptive_at() { # $1=ts
+	awk -F, -v ts="$1" '$1 == ts {
+		m = tolower($5)
+		if (m ~ /t[2346] time[- ]?out|loss of sync|sync timing synchronization failure|lost mdd timeout/) n++
+	} END { print n + 0 }' "$EVENTS"
+}
+
+# The uncorrectable errors of all channels since the previous good check,
+# from the channel rows stored for TS.
+uncorrectable_at() { # $1=ts
+	awk -F, -v ts="$1" '$1 == ts && $8 != "" { n += $8 } END { print n + 0 }' "$CHANNELS"
+}
+
+# Sets DOWN_TEXT (no connection: why) and BAD_TEXT (bad signal: which
+# signs) for a SURFboard's check. $1=ts $2=channel rows $3=connectivity
+cable_signs() {
+	local unlocked oos dslocked n
+	DOWN_TEXT=; BAD_TEXT=
+	read -r unlocked oos dslocked <<-EOF
+	$(printf '%s\n' "$2" | signal_signs)
+	EOF
+	[ "$(echo "$PINGS" | cut -d, -f3)" = 100 ] && DOWN_TEXT="no answer from $PING_HOST"
+	case $3 in [Oo]perational|'') ;; *) DOWN_TEXT="${DOWN_TEXT:+$DOWN_TEXT; }the modem reports $3" ;; esac
+	[ "${dslocked:-0}" -gt 0 ] || DOWN_TEXT="${DOWN_TEXT:+$DOWN_TEXT; }no downstream channel locked"
+	[ "$RESTART_SIGNAL" = 1 ] || return 0
+	[ "$RESTART_ON_UNLOCKED" = 1 ] && [ "${unlocked:-0}" -gt 0 ] && BAD_TEXT="$unlocked channel(s) not locked"
+	[ "$RESTART_ON_OUT_OF_SPEC" = 1 ] && [ "${oos:-0}" -gt 0 ] && BAD_TEXT="${BAD_TEXT:+$BAD_TEXT; }$oos channel(s) outside the acceptable range"
+	# Errors and log entries are signs only when the check before was
+	# recent: the first check (or the first after a long gap) finds the
+	# modem's whole log new, and errors added up over the gap.
+	[ -n "$PREV_GOOD" ] && [ "$1" -ge "$PREV_GOOD" ] && [ $(( $1 - PREV_GOOD )) -le $(( INTERVAL * 180 )) ] || return 0
+	if [ -n "$RESTART_ON_ERRORS" ]; then
+		n=$(uncorrectable_at "$1")
+		[ "$n" -ge "$RESTART_ON_ERRORS" ] && BAD_TEXT="${BAD_TEXT:+$BAD_TEXT; }$n uncorrectable errors"
+	fi
+	if [ -n "$RESTART_ON_EVENTS" ]; then
+		n=$(disruptive_at "$1")
+		[ "$n" -ge "$RESTART_ON_EVENTS" ] && BAD_TEXT="${BAD_TEXT:+$BAD_TEXT; }$n disruptive log entries"
+	fi
+	return 0
+}
+
+# A gateway's check: only "no connection" (no internet, not registered, no
+# radio); no signal rule yet. $1=registration $2=number of radios
+gateway_signs() {
+	DOWN_TEXT=; BAD_TEXT=
+	[ "$(echo "$PINGS" | cut -d, -f3)" = 100 ] && DOWN_TEXT="no answer from $PING_HOST"
+	case $1 in [Rr]egistered|'') ;; *) DOWN_TEXT="${DOWN_TEXT:+$DOWN_TEXT; }the gateway reports $1" ;; esac
+	[ "${2:-0}" -gt 0 ] || DOWN_TEXT="${DOWN_TEXT:+$DOWN_TEXT; }no radio connected"
+	return 0
+}
+
+last_restart_ts() {
+	[ -s "$DATA_DIR/restarts.csv" ] && tail -n +2 "$DATA_DIR/restarts.csv" | tail -n 1 | cut -d, -f1
+}
+
+auto_restarts_since() { # $1=ts -> automatic restarts tried since then
+	[ -s "$DATA_DIR/restarts.csv" ] || { echo 0; return; }
+	awk -F, -v since="$1" 'NR > 1 && $1 + 0 >= since && $2 != "manual" { n++ } END { print n + 0 }' "$DATA_DIR/restarts.csv"
+}
+
+# Decides, after a good check, from DOWN_TEXT and BAD_TEXT. Keeps since
+# when the connection has been down and how many checks in a row were bad
+# in RUN_DIR/auto, and a restart held back by a limit in RUN_DIR/restart_held
+# (for the status). Sets AUTO_MSG for the check's output.
+auto_restart() { # $1=ts
+	local ts=$1 state="$RUN_DIR/auto" held="$RUN_DIR/restart_held" since="" run=0 last trigger="" detail="" why=""
+	[ -s "$state" ] && read -r since run < "$state"
+	since=$(int_or "$since" ""); run=$(int_or "$run" 0)
+	last=$(int_or "$(last_restart_ts)" "")
+	if [ -n "$last" ] && [ $(( ts - last )) -lt $RESTART_SETTLE ]; then
+		rm -f "$state" "$held"
+		return 0
+	fi
+	if [ -n "$DOWN_TEXT" ]; then since=${since:-$ts}; else since=; fi
+	if [ -n "$BAD_TEXT" ]; then run=$(( run + 1 )); else run=0; fi
+	echo "${since:--} $run" > "$state"
+	if [ -n "$since" ] && [ $(( ts - since )) -ge $(( RESTART_DOWN_MIN * 60 )) ]; then
+		trigger=down; detail="no connection for $(( (ts - since) / 60 )) minutes ($DOWN_TEXT)"
+	elif [ "$RESTART_SIGNAL" = 1 ] && [ "$run" -ge "$RESTART_SIGNAL_CHECKS" ]; then
+		trigger=signal; detail="bad signal in $run checks in a row ($BAD_TEXT)"
+	fi
+	[ -n "$trigger" ] || { rm -f "$held"; return 0; }
+	if [ "$(auto_restarts_since $(( ts - 3600 )))" -ge "$RESTART_MAX_HOUR" ]; then
+		why="at most $RESTART_MAX_HOUR an hour"
+	elif [ "$(auto_restarts_since $(( ts - 86400 )))" -ge "$RESTART_MAX_DAY" ]; then
+		why="at most $RESTART_MAX_DAY a day"
+	fi
+	if [ -n "$why" ]; then
+		# Logged once per limit, not after every check.
+		grep -qF "$why" "$held" 2>/dev/null || log "would restart the modem ($detail), but automatic restarts are limited to $why"
+		printf '%s,%s,%s,%s\n' "$ts" "$trigger" "$why" "$(clean "$detail")" > "$held"
+		AUTO_MSG="restart held ($why)"
+		return 0
+	fi
+	rm -f "$held" "$state"
+	if restart_modem "$trigger" "$detail" >/dev/null; then
+		AUTO_MSG="restarted the modem ($detail)"
+	else
+		AUTO_MSG="could not restart the modem ($FAIL_REASON)"
+	fi
+}
+
+# The state of restarts, for the pages: whether automatic restarts are on,
+# a restart held back by a limit, the last attempt, and the automatic
+# attempts of the last day.
+restart_json() {
+	local last held f="$DATA_DIR/restarts.csv"
+	printf '{"auto":%s,"signal":%s,"down_min":%s,"max_hour":%s,"max_day":%s,"gateway":%s,' \
+		"$(json_bool [ "$RESTART_AUTO" = 1 ])" "$(json_bool [ "$RESTART_SIGNAL" = 1 ])" "$RESTART_DOWN_MIN" "$RESTART_MAX_HOUR" "$RESTART_MAX_DAY" \
+		"$(json_bool [ "$(uci -q get "$CONFIG.main.gw_restart")" = 1 ])"
+	held=$(cat "$RUN_DIR/restart_held" 2>/dev/null)
+	if [ -n "$held" ]; then
+		printf '"held":{"ts":%s,"trigger":%s,"limit":%s,"detail":%s},' "$(json_num "$(echo "$held" | cut -d, -f1)")" \
+			"$(json_str "$(echo "$held" | cut -d, -f2)")" "$(json_str "$(echo "$held" | cut -d, -f3)")" "$(json_str "$(echo "$held" | cut -d, -f4-)")"
+	else
+		printf '"held":null,'
+	fi
+	last=$([ -s "$f" ] && tail -n +2 "$f" | tail -n 1)
+	if [ -n "$last" ]; then
+		printf '"last":{"ts":%s,"trigger":%s,"result":%s,"detail":%s,"reason":%s},' "$(json_num "$(echo "$last" | cut -d, -f1)")" \
+			"$(json_str "$(echo "$last" | cut -d, -f2)")" "$(json_str "$(echo "$last" | cut -d, -f3)")" \
+			"$(json_str "$(echo "$last" | cut -d, -f4)")" "$(json_str "$(echo "$last" | cut -d, -f5)")"
+	else
+		printf '"last":null,'
+	fi
+	printf '"auto_last_day":%s}' "$(auto_restarts_since $(( $(date +%s) - 86400 )))"
 }
 
 do_restart() { # $1=trigger $2=detail
@@ -1444,7 +1682,9 @@ do_status() {
 			printf '%s:%s' "$(json_str "$k")" "$(json_str "$v")"
 		done < "$DATA_DIR/modem.txt"
 	fi
-	printf '},"export":'
+	printf '},"restart":'
+	restart_json
+	printf ',"export":'
 	export_json
 	printf ',"drives":['
 	first=1

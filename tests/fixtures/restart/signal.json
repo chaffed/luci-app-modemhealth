@@ -1,0 +1,799 @@
+{
+ "about": "Channel sets and how many channels are not locked, outside the acceptable range (power or SNR/MER judged bad by health.js channelVerdict), and downstream locked. The backend's automatic restarts (signal_signs) and health.js are both held to this (#41).",
+ "cases": [
+  {
+   "name": "all within range",
+   "channels": [
+    {
+     "dir": "ds",
+     "lock": "Locked",
+     "modulation": "256QAM",
+     "power_dbmv": "0.9",
+     "snr_db": "40.9"
+    },
+    {
+     "dir": "ds",
+     "lock": "Locked",
+     "modulation": "OFDM PLC",
+     "power_dbmv": "2.0",
+     "snr_db": "42.0"
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "OFDMA",
+     "power_dbmv": "44.0",
+     "snr_db": ""
+    }
+   ],
+   "expect": [
+    0,
+    0,
+    2
+   ]
+  },
+  {
+   "name": "downstream power above +15",
+   "channels": [
+    {
+     "dir": "ds",
+     "lock": "Locked",
+     "modulation": "256QAM",
+     "power_dbmv": "16.0",
+     "snr_db": "40.0"
+    },
+    {
+     "dir": "ds",
+     "lock": "Locked",
+     "modulation": "OFDM PLC",
+     "power_dbmv": "2.0",
+     "snr_db": "42.0"
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "OFDMA",
+     "power_dbmv": "44.0",
+     "snr_db": ""
+    }
+   ],
+   "expect": [
+    0,
+    1,
+    2
+   ]
+  },
+  {
+   "name": "SNR 32 at -8 dBmV: the low-power minimum (33) applies",
+   "channels": [
+    {
+     "dir": "ds",
+     "lock": "Locked",
+     "modulation": "256QAM",
+     "power_dbmv": "-8.0",
+     "snr_db": "32.0"
+    },
+    {
+     "dir": "ds",
+     "lock": "Locked",
+     "modulation": "OFDM PLC",
+     "power_dbmv": "2.0",
+     "snr_db": "42.0"
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "OFDMA",
+     "power_dbmv": "44.0",
+     "snr_db": ""
+    }
+   ],
+   "expect": [
+    0,
+    1,
+    2
+   ]
+  },
+  {
+   "name": "SNR 31 at -5 dBmV: the usual minimum (30) applies",
+   "channels": [
+    {
+     "dir": "ds",
+     "lock": "Locked",
+     "modulation": "256QAM",
+     "power_dbmv": "-5.0",
+     "snr_db": "31.0"
+    },
+    {
+     "dir": "ds",
+     "lock": "Locked",
+     "modulation": "OFDM PLC",
+     "power_dbmv": "2.0",
+     "snr_db": "42.0"
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "OFDMA",
+     "power_dbmv": "44.0",
+     "snr_db": ""
+    }
+   ],
+   "expect": [
+    0,
+    0,
+    2
+   ]
+  },
+  {
+   "name": "OFDM MER below 34",
+   "channels": [
+    {
+     "dir": "ds",
+     "lock": "Locked",
+     "modulation": "256QAM",
+     "power_dbmv": "0.9",
+     "snr_db": "40.9"
+    },
+    {
+     "dir": "ds",
+     "lock": "Locked",
+     "modulation": "OFDM PLC",
+     "power_dbmv": "2.0",
+     "snr_db": "33.5"
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "OFDMA",
+     "power_dbmv": "44.0",
+     "snr_db": ""
+    }
+   ],
+   "expect": [
+    0,
+    1,
+    2
+   ]
+  },
+  {
+   "name": "upstream 53 dBmV with 4 SC-QAM channels (max 51)",
+   "channels": [
+    {
+     "dir": "ds",
+     "lock": "Locked",
+     "modulation": "256QAM",
+     "power_dbmv": "0.9",
+     "snr_db": "40.9"
+    },
+    {
+     "dir": "ds",
+     "lock": "Locked",
+     "modulation": "OFDM PLC",
+     "power_dbmv": "2.0",
+     "snr_db": "42.0"
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "53.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "OFDMA",
+     "power_dbmv": "44.0",
+     "snr_db": ""
+    }
+   ],
+   "expect": [
+    0,
+    1,
+    2
+   ]
+  },
+  {
+   "name": "upstream 53 dBmV with 2 SC-QAM channels (max 54)",
+   "channels": [
+    {
+     "dir": "ds",
+     "lock": "Locked",
+     "modulation": "256QAM",
+     "power_dbmv": "0.9",
+     "snr_db": "40.9"
+    },
+    {
+     "dir": "ds",
+     "lock": "Locked",
+     "modulation": "OFDM PLC",
+     "power_dbmv": "2.0",
+     "snr_db": "42.0"
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "53.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "OFDMA",
+     "power_dbmv": "44.0",
+     "snr_db": ""
+    }
+   ],
+   "expect": [
+    0,
+    0,
+    2
+   ]
+  },
+  {
+   "name": "OFDMA above 65",
+   "channels": [
+    {
+     "dir": "ds",
+     "lock": "Locked",
+     "modulation": "256QAM",
+     "power_dbmv": "0.9",
+     "snr_db": "40.9"
+    },
+    {
+     "dir": "ds",
+     "lock": "Locked",
+     "modulation": "OFDM PLC",
+     "power_dbmv": "2.0",
+     "snr_db": "42.0"
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "OFDMA",
+     "power_dbmv": "66.0",
+     "snr_db": ""
+    }
+   ],
+   "expect": [
+    0,
+    1,
+    2
+   ]
+  },
+  {
+   "name": "a downstream channel not locked (and its zero SNR out of range)",
+   "channels": [
+    {
+     "dir": "ds",
+     "lock": "Not Locked",
+     "modulation": "Unknown",
+     "power_dbmv": "0.0",
+     "snr_db": "0.0"
+    },
+    {
+     "dir": "ds",
+     "lock": "Locked",
+     "modulation": "OFDM PLC",
+     "power_dbmv": "2.0",
+     "snr_db": "42.0"
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "OFDMA",
+     "power_dbmv": "44.0",
+     "snr_db": ""
+    }
+   ],
+   "expect": [
+    1,
+    1,
+    1
+   ]
+  },
+  {
+   "name": "no downstream channel locked",
+   "channels": [
+    {
+     "dir": "ds",
+     "lock": "Not Locked",
+     "modulation": "Unknown",
+     "power_dbmv": "",
+     "snr_db": ""
+    },
+    {
+     "dir": "ds",
+     "lock": "Not Locked",
+     "modulation": "Unknown",
+     "power_dbmv": "",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    }
+   ],
+   "expect": [
+    2,
+    0,
+    0
+   ]
+  },
+  {
+   "name": "empty values are not out of range",
+   "channels": [
+    {
+     "dir": "ds",
+     "lock": "Locked",
+     "modulation": "256QAM",
+     "power_dbmv": "",
+     "snr_db": ""
+    },
+    {
+     "dir": "ds",
+     "lock": "Locked",
+     "modulation": "OFDM PLC",
+     "power_dbmv": "2.0",
+     "snr_db": "42.0"
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "OFDMA",
+     "power_dbmv": "44.0",
+     "snr_db": ""
+    }
+   ],
+   "expect": [
+    0,
+    0,
+    2
+   ]
+  },
+  {
+   "name": "a changed limit: downstream acceptable up to 20",
+   "limits": {
+    "ds_power_acceptable_max": "20"
+   },
+   "channels": [
+    {
+     "dir": "ds",
+     "lock": "Locked",
+     "modulation": "256QAM",
+     "power_dbmv": "16.0",
+     "snr_db": "40.0"
+    },
+    {
+     "dir": "ds",
+     "lock": "Locked",
+     "modulation": "OFDM PLC",
+     "power_dbmv": "2.0",
+     "snr_db": "42.0"
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "OFDMA",
+     "power_dbmv": "44.0",
+     "snr_db": ""
+    }
+   ],
+   "expect": [
+    0,
+    0,
+    2
+   ]
+  },
+  {
+   "name": "a changed limit: 4-channel upstream acceptable up to 55",
+   "limits": {
+    "us_power_4_acceptable_max": "55"
+   },
+   "channels": [
+    {
+     "dir": "ds",
+     "lock": "Locked",
+     "modulation": "256QAM",
+     "power_dbmv": "0.9",
+     "snr_db": "40.9"
+    },
+    {
+     "dir": "ds",
+     "lock": "Locked",
+     "modulation": "OFDM PLC",
+     "power_dbmv": "2.0",
+     "snr_db": "42.0"
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "53.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "OFDMA",
+     "power_dbmv": "44.0",
+     "snr_db": ""
+    }
+   ],
+   "expect": [
+    0,
+    0,
+    2
+   ]
+  },
+  {
+   "name": "a changed limit: SNR good from 42 and acceptable from 41",
+   "limits": {
+    "ds_snr_good_min": "42",
+    "ds_snr_acceptable_min": "41"
+   },
+   "channels": [
+    {
+     "dir": "ds",
+     "lock": "Locked",
+     "modulation": "256QAM",
+     "power_dbmv": "0.9",
+     "snr_db": "40.9"
+    },
+    {
+     "dir": "ds",
+     "lock": "Locked",
+     "modulation": "OFDM PLC",
+     "power_dbmv": "2.0",
+     "snr_db": "42.0"
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "SC-QAM",
+     "power_dbmv": "45.0",
+     "snr_db": ""
+    },
+    {
+     "dir": "us",
+     "lock": "Locked",
+     "modulation": "OFDMA",
+     "power_dbmv": "44.0",
+     "snr_db": ""
+    }
+   ],
+   "expect": [
+    0,
+    1,
+    2
+   ]
+  }
+ ]
+}

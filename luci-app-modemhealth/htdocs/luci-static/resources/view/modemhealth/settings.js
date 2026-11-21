@@ -100,6 +100,7 @@ return view.extend({
 		s.tab('modem', _('Modem'));
 		s.tab('schedule', _('Schedule'));
 		s.tab('storage', _('Storage'));
+		s.tab('restart', _('Restarts'));
 		s.tab('report', _('Report details'));
 
 		o = s.taboption('modem', form.ListValue, 'modem_type', _('Modem'),
@@ -216,6 +217,52 @@ return view.extend({
 				])
 			]);
 		};
+
+		/* Automatic restarts (#39): off unless switched on. Kept while
+		 * switched off (retain), so switching off and on keeps them. */
+		var after = function(o) { o.depends('restart_auto', '1'); o.retain = true; return o; };
+		o = s.taboption('restart', form.Flag, 'restart_auto', _('Restart the modem automatically'),
+			_('Off unless you switch it on. Modem Health then restarts a SURFboard that answers but has lost its connection, as its own Restart button does. Every restart is recorded, and the report tells them apart from restarts the modem made on its own. A restart cannot fix a fault on the line: if restarts keep being needed, the provider has to look at it.'));
+		o.rmempty = false;
+		o.default = '0';
+		o = after(s.taboption('restart', form.Value, 'restart_down_min', _('After no connection for (minutes)'),
+			_('No connection: no answer from the internet host, the modem not "Operational", or no downstream channel locked, while the modem itself answers.')));
+		o.datatype = 'and(uinteger,range(1,240))';
+		o.default = '10';
+		o.placeholder = '10';
+		o = after(s.taboption('restart', form.Flag, 'restart_signal', _('Also restart after bad signal'),
+			_('Restarts can hide the faults the report is meant to show the provider: use this only if restarts really help your line.')));
+		o.rmempty = false;
+		o.default = '0';
+		o = after(s.taboption('restart', form.Value, 'restart_signal_checks', _('After this many bad checks in a row'),
+			_('A check is bad when it shows any of the signs chosen below.')));
+		o.datatype = 'and(uinteger,range(1,100))';
+		o.default = '3';
+		o.placeholder = '3';
+		o = after(s.taboption('restart', form.Flag, 'restart_on_unlocked', _('Sign: a channel not locked')));
+		o.rmempty = false;
+		o.default = '1';
+		o = after(s.taboption('restart', form.Flag, 'restart_on_out_of_spec', _('Sign: a channel outside the acceptable range'),
+			_('Downstream power and SNR/MER and upstream power, against the health limits.')));
+		o.rmempty = false;
+		o.default = '1';
+		o = after(s.taboption('restart', form.Value, 'restart_on_errors', _('Sign: at least this many uncorrectable errors in one check'),
+			_('Across all channels, since the check before. Empty: not a sign.')));
+		o.datatype = 'and(uinteger,range(1,999999999))';
+		o.rmempty = true;
+		o = after(s.taboption('restart', form.Value, 'restart_on_events', _('Sign: at least this many disruptive log entries in one check'),
+			_('T3/T4 time-outs, loss of sync, lost MDD. Empty: not a sign.')));
+		o.datatype = 'and(uinteger,range(1,100))';
+		o.rmempty = true;
+		o = after(s.taboption('restart', form.Value, 'restart_max_hour', _('At most this many automatic restarts an hour'),
+			_('Over a limit Modem Health stops restarting, and the Overview says so. Nothing is counted for 15 minutes after a restart, while the modem comes back.')));
+		o.datatype = 'and(uinteger,range(0,10))';
+		o.default = '1';
+		o.placeholder = '1';
+		o = after(s.taboption('restart', form.Value, 'restart_max_day', _('At most this many automatic restarts a day')));
+		o.datatype = 'and(uinteger,range(0,48))';
+		o.default = '3';
+		o.placeholder = '3';
 
 		/* Printed on the report so that the provider can match it to an
 		 * account; one line of text each. */
