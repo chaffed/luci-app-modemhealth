@@ -150,6 +150,7 @@ local password_ok = text(128)
 -- "optional" settings are removed when left empty (the default applies).
 local FIELDS = {
     enabled = { check = function(v) return v == "0" or v == "1" end },
+    modem_type = { check = function(v) return v == "auto" or v == "surfboard" or v == "tmobile" end },
     interval = { check = range(1, 60) },
     host = { check = host },
     username = { check = text(64) },

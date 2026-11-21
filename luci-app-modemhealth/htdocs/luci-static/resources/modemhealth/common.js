@@ -631,8 +631,18 @@ function legend(items) {
 	}));
 }
 
+/* Test connection's answer for a T-Mobile gateway. */
+function gatewayText(r) {
+	var radios = (r.radios || []).map(function(x) {
+		return _('%s %s: RSRP %s dBm, SINR %s dB').format(x.tech === 'nr' ? '5G' : '4G', x.bands || '?',
+			x.rsrp == null ? '?' : x.rsrp, x.sinr == null ? '?' : x.sinr);
+	});
+	return _('Connected: %s, firmware %s (T-Mobile gateway, %s). %s').format(r.model || '?', r.firmware || '?',
+		r.registration || _('registration unknown'), radios.length ? radios.join('; ') + '.' : _('No radio is connected.'));
+}
+
 return baseclass.extend({
-	C: C, health: health,
+	C: C, health: health, gatewayText: gatewayText,
 	callStatus: callStatus, callData: callData, callCheck: callCheck, callTest: callTest, callSetPassword: callSetPassword,
 	callExport: callExport, callClear: callClear,
 	parseCSV: parseCSV, load: load, loadDigest: loadDigest, analyse: analyse, toCSV: toCSV, csvField: csvField, esc: esc,

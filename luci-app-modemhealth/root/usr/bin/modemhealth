@@ -19,9 +19,12 @@
 # from the other settings, so that the web pages, which load the whole
 # settings file, never receive it.
 #
-# Supported modems: ARRIS/Vantiva SURFboard S33 and S34 (HNAP, HMAC-SHA256).
-# The modem reader (the "modem_*" functions) only logs in and turns replies
-# into lines; storage is separate, so other models can be added as readers.
+# Supported modems: ARRIS/Vantiva SURFboard S33 and S34 (HNAP, HMAC-SHA256),
+# and T-Mobile 5G Home Internet gateways that speak the TMI API (Arcadyan
+# KVD21, Sagemcom 5688W, TMO-G4AR/G4SE/G5AR/G5SE; built from public clients'
+# code, not yet tested on a real one: #28). The readers (the "modem_*" and
+# "gw_*" functions) only fetch and turn replies into lines; storage is
+# separate. Setting modem_type: auto (default), surfboard or tmobile.
 #
 # SPDX-License-Identifier: MIT
 # shellcheck shell=dash
@@ -39,6 +42,8 @@ READINGS_HEADER='ts,result,reason,model,firmware,uptime_s,connectivity,boot,netw
 EVENTS_HEADER='first_seen_ts,modem_time,clock_offset_s,level,message'
 CHANNELS_HEADER='ts,dir,channel_id,lock,power_dbmv,snr_db,corrected,uncorrectable'
 CHANNELMAP_HEADER='ts,dir,ch,channel_id,modulation,freq_hz,width_hz'
+# A gateway's radios, one row per radio per good check (tech: lte or nr).
+RADIOS_HEADER='ts,tech,bands,bars,rsrp_dbm,rsrq_db,rssi_dbm,sinr_db,cell'
 
 log() { logger -t modemhealth "$*" 2>/dev/null; [ -t 2 ] && echo "modemhealth: $*" >&2; return 0; }
 
@@ -68,6 +73,8 @@ load_config() {
 	[ "$HISTORY_DAYS" -ge 1 ] || HISTORY_DAYS=1
 	RUN_DIR=${MODEMHEALTH_RUN_DIR:-/var/run/modemhealth}
 	EXPORT_DIR=$(uci -q get "$CONFIG.main.export_dir")
+	MODEM_TYPE=$(uci -q get "$CONFIG.main.modem_type")
+	case $MODEM_TYPE in surfboard|tmobile) ;; *) MODEM_TYPE=auto ;; esac
 	BASE="https://$HOST"
 }
 
@@ -258,6 +265,114 @@ channel_rows() {
 	}'
 }
 
+# -------------------------------------------------------------- gateway reader
+# T-Mobile 5G Home Internet gateways (TMI REST API). GET
+# /TMI/v1/gateway?get=all answers without a login with the device, both
+# radios (signal.4g / signal.5g, either missing or null) and the uptime (no
+# "time" on a G5AR). The API answers on port 8080 or 80 depending on the
+# model. Nothing else is ever requested: no login (failed logins lock the
+# gateway's admin account), and never anything that writes.
+
+# Ports to try: the one in the address if it has one, else 8080 then 80.
+gw_ports() {
+	case $HOST in
+		*:*) echo "${HOST##*:}" ;;
+		*) echo "${MODEMHEALTH_GW_PORTS:-8080 80}" ;;   # (the tests use other ports)
+	esac
+}
+
+# gw_get PORT -> $RUN_DIR/gateway.json; sets HTTP_CODE; returns curl's code
+gw_get() {
+	HTTP_CODE=$(curl -s --max-time "$TIMEOUT" -o "$RUN_DIR/gateway.json" -w '%{http_code}' \
+		-H 'Accept: application/json' "http://${HOST%%:*}:$1/TMI/v1/gateway?get=all")
+}
+
+gw_field() { # $1=jsonfilter path below the reply
+	jsonfilter -i "$RUN_DIR/gateway.json" -e "@$1" 2>/dev/null | head -n 1
+}
+
+# A reply is a gateway's when it has the signal block.
+gw_is_reply() {
+	jsonfilter -i "$RUN_DIR/gateway.json" -e '@.signal' >/dev/null 2>&1
+}
+
+# Reads the gateway into $RUN_DIR/gateway.json; sets GW_PORT, or
+# FAIL_REASON. The port that answered is remembered (in RAM).
+gw_read() {
+	local p rc ports cached=""
+	[ -s "$RUN_DIR/gateway.port" ] && [ "$RUN_DIR/gateway.port" -nt /etc/config/$CONFIG ] && cached=$(cat "$RUN_DIR/gateway.port")
+	ports=$cached
+	for p in $(gw_ports); do [ "$p" = "$cached" ] || ports="$ports $p"; done
+	FAIL_REASON=
+	for p in $ports; do
+		gw_get "$p"; rc=$?
+		# The most telling reason wins: something that answered (a wrong
+		# page, not a gateway) over a port where nothing did.
+		if [ $rc -ne 0 ]; then
+			case $FAIL_REASON in http_*|not_a_supported_device) ;; *) curl_failed $rc ;; esac
+			continue
+		fi
+		if [ "$HTTP_CODE" != 200 ]; then FAIL_REASON="http_$HTTP_CODE"; continue; fi
+		if ! gw_is_reply; then FAIL_REASON=not_a_supported_device; continue; fi
+		GW_PORT=$p
+		echo "$p" > "$RUN_DIR/gateway.port"
+		return 0
+	done
+	rm -f "$RUN_DIR/gateway.json"
+	return 1
+}
+
+# A number within [lo, hi], else empty: a value outside the range the
+# 3GPP specifications allow a device to report is a bad reading, not a
+# bad signal. Whole numbers without ".0".
+in_range() { # $1=value $2=lo $3=hi
+	printf '%s' "$1" | awk -v lo="$2" -v hi="$3" '
+		/^-?[0-9]+(\.[0-9]+)?$/ { v = $0 + 0; if (v >= lo && v <= hi) { if (v == int(v)) printf "%d", v; else printf "%s", v } }'
+}
+
+# gw_radio_rows TS -> CSV lines in RADIOS_HEADER order, LTE then NR.
+# Ranges: 3GPP TS 36.133 (LTE) and 38.133 (NR) reporting ranges, the wider
+# of the two: RSRP -156..-31 dBm, RSRQ -43..20 dB, SINR -23..40 dB; RSSI
+# has no reporting range in either, so -120..0 dBm is used as a sanity
+# bound only.
+gw_radio_rows() {
+	local key tech id bands cell
+	for key in 4g 5g; do
+		jsonfilter -i "$RUN_DIR/gateway.json" -e "@.signal[\"$key\"].rsrp" >/dev/null 2>&1 ||
+			jsonfilter -i "$RUN_DIR/gateway.json" -e "@.signal[\"$key\"].bands" >/dev/null 2>&1 || continue
+		if [ "$key" = 4g ]; then tech=lte; id=eNBID; else tech=nr; id=gNBID; fi
+		bands=$(jsonfilter -i "$RUN_DIR/gateway.json" -e "@.signal[\"$key\"].bands[*]" 2>/dev/null | tr '\n' ' ' | tr -d '\000-\037",\\<>' | sed 's/  */ /g; s/^ //; s/ $//' | cut -c1-60)
+		cell=$(int_or "$(gw_field ".signal[\"$key\"].$id")" "")
+		[ -n "$cell" ] && cell="$cell-$(int_or "$(gw_field ".signal[\"$key\"].cid")" "")"
+		printf '%s,%s,%s,%s,%s,%s,%s,%s,%s\n' "$1" "$tech" "$bands" \
+			"$(in_range "$(gw_field ".signal[\"$key\"].bars")" 0 5)" \
+			"$(in_range "$(gw_field ".signal[\"$key\"].rsrp")" -156 -31)" \
+			"$(in_range "$(gw_field ".signal[\"$key\"].rsrq")" -43 20)" \
+			"$(in_range "$(gw_field ".signal[\"$key\"].rssi")" -120 0)" \
+			"$(in_range "$(gw_field ".signal[\"$key\"].sinr")" -23 40)" "$cell"
+	done
+}
+
+# Which reader to use: sets DEVICE to surfboard or tmobile. "auto": a
+# SURFboard at its usual address; elsewhere the gateway API if it answers.
+detect_device() {
+	DEVICE=$MODEM_TYPE
+	[ "$DEVICE" = auto ] || return 0
+	case ${HOST%%:*} in 192.168.100.1) DEVICE=surfboard; return 0 ;; esac
+	if [ -s "$RUN_DIR/device" ] && [ "$RUN_DIR/device" -nt /etc/config/$CONFIG ]; then
+		DEVICE=$(cat "$RUN_DIR/device")
+		case $DEVICE in surfboard|tmobile) return 0 ;; esac
+	fi
+	# Only what answered is remembered: a gateway that is down for a
+	# moment must not be taken for a SURFboard until the next restart.
+	if gw_read; then
+		DEVICE=tmobile
+		echo tmobile > "$RUN_DIR/device"
+	else
+		DEVICE=surfboard
+	fi
+}
+
 # --------------------------------------------------------------------- storage
 #
 # DATA_DIR (flash, kept across firmware upgrades):
@@ -268,11 +383,16 @@ channel_rows() {
 #   events/YYYY-MM-DD.csv     the modem's event log entries, each stored once,
 #                             by the day it was first seen
 #   events.seen               the entries of the previous log read
+#   radios/YYYY-MM-DD.csv     a gateway's radios, one row per radio per good
+#                             check: band, bars, RSRP, RSRQ, RSSI, SINR and
+#                             the tower (eNB/gNB ID and cell ID)
+#   radios.last               the radios at the previous good check, to
+#                             notice tower and band changes
 #   channelmap.csv            the channel line-up (position, modulation,
 #                             frequency, width): an entry for a channel
 #                             only when one of these changes
 #   channelmap.last           the line-up at the previous good check
-#   modem.txt                 model, firmware, MAC: what the ISP needs
+#   modem.txt                 type, model, firmware, MAC: what the ISP needs
 #   last                      previous good check: time, uptime, counters
 # Days before today are gzipped, and days older than history_days removed.
 # 90 days at 5-minute checks with ~40 channels is about 4-8 MB.
@@ -320,7 +440,7 @@ measure_pings() {
 tidy_store() {
 	local cutoff f name
 	cutoff=$(date -d "@$(( $(date +%s) - HISTORY_DAYS * 86400 ))" +%Y%m%d 2>/dev/null) || return 0
-	for f in "$DATA_DIR"/readings/*.csv* "$DATA_DIR"/channels/*.csv* "$DATA_DIR"/events/*.csv*; do
+	for f in "$DATA_DIR"/readings/*.csv* "$DATA_DIR"/channels/*.csv* "$DATA_DIR"/events/*.csv* "$DATA_DIR"/radios/*.csv*; do
 		[ -e "$f" ] || continue
 		name=${f##*/}; name=${name%%.*}
 		case $name in [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;; *) continue ;; esac
@@ -566,6 +686,8 @@ export_fail() { # $1=nodrive|error $2=reason; logged once, not after every check
 # after the last one it holds.
 export_append() { # $1=kind $2=header
 	local dest="$EXPORT_DIR/modemhealth-$1.csv" last=0
+	# A kind this router has never stored (radios behind a cable modem).
+	[ -d "$DATA_DIR/$1" ] || [ -e "$dest" ] || return 0
 	if [ -s "$dest" ]; then
 		last=$(int_or "$(tail -c 4096 "$dest" | tail -n 1 | cut -d, -f1)" 0)
 	else
@@ -636,10 +758,10 @@ report_html() {
 	cat "$SHARE/standalone.html" || return 1
 	# The history as text; "&" and "<" are the only characters that mean
 	# anything to a browser there.
-	for k in readings channels events; do
+	for k in readings channels events radios; do
 		printf '<pre hidden id="mh-%s">\n' "$k"
 		{
-			case $k in readings) echo "$READINGS_HEADER" ;; channels) echo "$CHANNELS_HEADER" ;; events) echo "$EVENTS_HEADER" ;; esac
+			case $k in readings) echo "$READINGS_HEADER" ;; channels) echo "$CHANNELS_HEADER" ;; events) echo "$EVENTS_HEADER" ;; radios) echo "$RADIOS_HEADER" ;; esac
 			rows_between "$k" "$since" 9999999999
 		} | sed 's/&/\&amp;/g; s/</\&lt;/g'
 		printf '</pre>\n'
@@ -699,7 +821,7 @@ export_files() { # $1=1: write the report file whatever its age
 	fi
 	ensure_store 2>/dev/null
 	if ! { export_append readings "$READINGS_HEADER" && export_append channels "$CHANNELS_HEADER" &&
-		export_append events "$EVENTS_HEADER" && export_replace modemhealth-lineup.csv < "$DATA_DIR/channelmap.csv" &&
+		export_append events "$EVENTS_HEADER" && export_append radios "$RADIOS_HEADER" && export_replace modemhealth-lineup.csv < "$DATA_DIR/channelmap.csv" &&
 		outages_csv "$dir/modemhealth-readings.csv" | export_replace modemhealth-outages.csv; } 2>/dev/null; then
 		export_fail error "the drive cannot be written to (full or read-only?)"
 		return 1
@@ -767,7 +889,7 @@ archive_export() {
 	[ -n "$dir" ] || return 0
 	on_drive "$dir" || return 0
 	stamp=$(date +%Y%m%d-%H%M%S)
-	for f in "$dir"/modemhealth-readings.csv "$dir"/modemhealth-channels.csv "$dir"/modemhealth-events.csv \
+	for f in "$dir"/modemhealth-readings.csv "$dir"/modemhealth-channels.csv "$dir"/modemhealth-events.csv "$dir"/modemhealth-radios.csv \
 		"$dir"/modemhealth-lineup.csv "$dir"/modemhealth-outages.csv "$dir"/modemhealth-report.html; do
 		[ -e "$f" ] || continue
 		base=${f##*/}
@@ -781,14 +903,98 @@ archive_export() {
 do_clear() {
 	load_config
 	archive_export
-	rm -rf "$DATA_DIR/readings" "$DATA_DIR/channels" "$DATA_DIR/events"
-	rm -f "$DATA_DIR/events.seen" "$DATA_DIR/channelmap.csv" "$DATA_DIR/channelmap.last" "$DATA_DIR/last" "$RUN_DIR/export" "$RUN_DIR/lineup_tidied"
+	rm -rf "$DATA_DIR/readings" "$DATA_DIR/channels" "$DATA_DIR/events" "$DATA_DIR/radios"
+	rm -f "$DATA_DIR/radios.last" "$DATA_DIR/events.seen" "$DATA_DIR/channelmap.csv" "$DATA_DIR/channelmap.last" "$DATA_DIR/last" "$RUN_DIR/export" "$RUN_DIR/lineup_tidied"
 	ensure_store
 	log "history cleared"
 	echo '{"cleared":true}'
 }
 
 # ---------------------------------------------------------------------- check
+
+# A check of a T-Mobile gateway. Sets nothing on the gateway and needs no
+# password. Readings keep: registration (connectivity), home/roaming
+# (network_access), the gateway's clock (modem_time) and uptime; the
+# cable-only columns stay empty. The radios go to radios/.
+gw_check() {
+	local ts=$1 rows uptime="" model firmware reboot=0 boot_ts="" modem_time="" offset="" lt registration roaming n changes
+	if { [ -z "$GW_PORT" ] || [ ! -s "$RUN_DIR/gateway.json" ]; } && ! gw_read; then
+		store_failed "$ts" "$FAIL_REASON"
+		log "check failed: $FAIL_REASON"
+		export_now
+		echo "failed: $FAIL_REASON"
+		return 1
+	fi
+	rows=$(gw_radio_rows "$ts")
+	n=$(printf '%s' "$rows" | grep -c .)
+	uptime=$(int_or "$(gw_field '.time.upTime' | cut -d. -f1)" "")
+	model=$(clean "$(gw_field '.device.model')")
+	firmware=$(clean "$(gw_field '.device.softwareVersion')")
+	registration=$(clean "$(gw_field '.signal.generic.registration')")
+	roaming=$(gw_field '.signal.generic.roaming')
+	case $roaming in true) roaming=roaming ;; false) roaming=home ;; *) roaming= ;; esac
+	lt=$(int_or "$(gw_field '.time.localTime' | cut -d. -f1)" "")
+	if [ -n "$lt" ]; then
+		modem_time=$(date -d "@$lt" '+%Y-%m-%d %H:%M:%S' 2>/dev/null)
+		offset=$(( ts - lt ))
+	fi
+
+	if [ -n "$uptime" ] && read_last && [ "$ts" -ge "$PREV_TS" ] \
+		&& [ $(( uptime + 120 )) -lt $(( PREV_UPTIME + ts - PREV_TS )) ]; then
+		reboot=1
+		boot_ts=$(( ts - uptime ))
+		log "gateway restarted at $(date -d "@$boot_ts" '+%Y-%m-%d %H:%M:%S' 2>/dev/null)"
+	fi
+
+	changes=$(gw_store_radios "$ts" "$rows" "$modem_time" "$offset")
+	echo "$ts ${uptime:-0}" > "$DATA_DIR/last.new" && mv -f "$DATA_DIR/last.new" "$DATA_DIR/last"
+	echo "$ts,ok,,$model,$firmware,$uptime,$registration,,$roaming,$modem_time,,,$reboot,$boot_ts,$offset,$PINGS" >> "$READINGS"
+	{
+		echo "type=tmobile"
+		echo "model=$model"
+		echo "firmware=$firmware"
+		echo "mac=$(clean "$(gw_field '.device.macId')")"
+		echo "maker=$(clean "$(gw_field '.device.manufacturer')")"
+	} > "$DATA_DIR/modem.txt.new" && mv -f "$DATA_DIR/modem.txt.new" "$DATA_DIR/modem.txt"
+	rm -f "$RUN_DIR/gateway.json"
+	export_now
+	echo "ok: $model, $n radio(s), ${registration:-registration unknown}, up ${uptime:-?}s${changes:+, $changes}$([ $reboot = 1 ] && echo ', restarted since the last check')"
+}
+
+# Store the radios of a good check, and an event for each tower or band
+# change since the previous good check. Prints what changed, if anything.
+# $1=ts $2=rows $3=gateway time $4=clock offset
+gw_store_radios() {
+	local ts=$1 rows=$2 day f
+	day=$(today)
+	mkdir -p "$DATA_DIR/radios" || return 1
+	f="$DATA_DIR/radios/$day.csv"
+	[ -s "$f" ] || echo "$RADIOS_HEADER" > "$f"
+	[ -n "$rows" ] && printf '%s\n' "$rows" >> "$f"
+	printf '%s\n' "$rows" | awk -F, -v prev="$DATA_DIR/radios.last" -v nextf="$DATA_DIR/radios.last.new" \
+		-v ts="$ts" -v when="$3" -v offset="$4" -v out="$EVENTS" '
+		BEGIN { while ((getline line < prev) > 0) { split(line, p, " "); cell[p[1]] = p[2]; bands[p[1]] = p[3]; had[p[1]] = 1 } close(prev) }
+		$2 == "" { next }
+		{
+			name = ($2 == "nr" ? "5G" : "4G"); b = $3; gsub(/ /, "+", b)
+			print $2, ($9 == "" ? "-" : $9), (b == "" ? "-" : b) > nextf
+			seen[$2] = 1
+			if (!($2 in had)) next
+			if ($9 != "" && cell[$2] != "-" && $9 != cell[$2]) {
+				print ts "," when "," offset ",Notice,Tower change on " name ": " cell[$2] " to " $9 >> out; n++
+			}
+			if (b != "" && bands[$2] != "-" && b != bands[$2]) {
+				print ts "," when "," offset ",Notice,Band change on " name ": " bands[$2] " to " b >> out; n++
+			}
+		}
+		END {
+			for (t in had) if (!(t in seen)) {
+				print ts "," when "," offset ",Notice," (t == "nr" ? "5G" : "4G") " radio no longer connected" >> out; n++
+			}
+			if (n) printf "%d tower/band change(s)", n
+		}'
+	mv -f "$DATA_DIR/radios.last.new" "$DATA_DIR/radios.last" 2>/dev/null || : > "$DATA_DIR/radios.last"
+}
 
 do_check() {
 	local ts rows ds us ds_n us_n uptime model firmware reboot=0 boot_ts="" modem_time offset new_events
@@ -799,6 +1005,12 @@ do_check() {
 	ts=$(date +%s)
 	FAIL_REASON=
 	measure_pings
+	GW_PORT=
+	detect_device
+	if [ "$DEVICE" = tmobile ]; then
+		gw_check "$ts"
+		return $?
+	fi
 
 	if ! modem_read_with_session; then
 		[ "$FAIL_REASON" = login_refused ] && session_drop
@@ -810,6 +1022,7 @@ do_check() {
 		return 1
 	fi
 
+	[ "$MODEM_TYPE" = auto ] && echo surfboard > "$RUN_DIR/device"
 	ds=$(status_field GetCustomerStatusDownstreamChannelInfo CustomerConnDownstreamChannel)
 	us=$(status_field GetCustomerStatusUpstreamChannelInfo CustomerConnUpstreamChannel)
 	rows=$( { channel_rows "$ts" ds "$ds"; channel_rows "$ts" us "$us"; } )
@@ -839,6 +1052,7 @@ do_check() {
 
 	# What identifies the modem to the ISP; overwritten on every good reading.
 	{
+		echo "type=surfboard"
 		echo "model=$model"
 		echo "firmware=$firmware"
 		echo "mac=$(clean "$(status_field GetCustomerStatusSoftware StatusSoftwareMac)")"
@@ -1039,10 +1253,10 @@ do_data() {
 	local since until k
 	since=$(int_or "$1" 0); until=$(int_or "$2" "$(date +%s)")
 	printf '{"since":%s,"until":%s' "$since" "$until"
-	for k in readings channels events; do
+	for k in readings channels events radios; do
 		printf ',"%s":' "$k"
 		{
-			case $k in readings) echo "$READINGS_HEADER" ;; channels) echo "$CHANNELS_HEADER" ;; events) echo "$EVENTS_HEADER" ;; esac
+			case $k in readings) echo "$READINGS_HEADER" ;; channels) echo "$CHANNELS_HEADER" ;; events) echo "$EVENTS_HEADER" ;; radios) echo "$RADIOS_HEADER" ;; esac
 			rows_between "$k" "$since" "$until"
 		} | json_text
 	done
@@ -1124,6 +1338,21 @@ do_test() { # $1=file from test-input (optional)
 	# Timestamps must never go below what the modem has already seen.
 	cp /var/run/modemhealth/last_ms "$RUN_DIR/" 2>/dev/null
 	FAIL_REASON=
+	detect_device
+	if [ "$DEVICE" = tmobile ]; then
+		if [ -s "$RUN_DIR/gateway.json" ] || gw_read; then
+			printf '{"ok":true,"type":"tmobile","model":%s,"firmware":%s,"radios":[' \
+				"$(json_str "$(clean "$(gw_field '.device.model')")")" "$(json_str "$(clean "$(gw_field '.device.softwareVersion')")")"
+			gw_radio_rows 0 | awk -F, 'BEGIN { sep = "" } {
+				printf "%s{\"tech\":\"%s\",\"bands\":\"%s\",\"bars\":%s,\"rsrp\":%s,\"rsrq\":%s,\"sinr\":%s}", sep, $2, $3,
+					($4 == "" ? "null" : $4), ($5 == "" ? "null" : $5), ($6 == "" ? "null" : $6), ($8 == "" ? "null" : $8); sep = "," }'
+			printf '],"registration":%s}\n' "$(json_str "$(clean "$(gw_field '.signal.generic.registration')")")"
+		else
+			printf '{"ok":false,"type":"tmobile","reason":%s}\n' "$(json_str "$FAIL_REASON")"
+		fi
+		rm -rf "$RUN_DIR"
+		return 0
+	fi
 	if modem_login && modem_read_status; then
 		ds=$(status_field GetCustomerStatusDownstreamChannelInfo CustomerConnDownstreamChannel | awk -F'\\|\\+\\|' '{ print NF - ($0 ~ /\|\+\|$/) }')
 		us=$(status_field GetCustomerStatusUpstreamChannelInfo CustomerConnUpstreamChannel | awk -F'\\|\\+\\|' '{ print NF - ($0 ~ /\|\+\|$/) }')

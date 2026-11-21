@@ -299,7 +299,7 @@ r = M.test({ password = "x" })
 ok("test without an answer says so", r.ok == false and r.reason == "no_answer")
 
 -- every setting the LuCI page offers can be set from the panel
-local luci = { "enabled", "interval", "host", "username", "ping_host", "history_days",
+local luci = { "enabled", "modem_type", "interval", "host", "username", "ping_host", "history_days",
     "isp_name", "subscriber", "account", "service_address", "export_dir" }
 local missing, n = {}, 0
 for _, k in ipairs(luci) do if not M.FIELDS[k] then missing[#missing + 1] = k end end
