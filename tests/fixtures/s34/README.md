@@ -9,3 +9,8 @@ Identifiers are replaced with reserved documentation values: the modem MAC
 with `00:00:5E:00:53:01`, the CMTS MAC with `00:00:5E:00:53:02`, the public IP
 with `203.0.113.7`, and the serial number with zeros. Everything else is as
 the modem sent it.
+
+`cmconfiguration.json` is the same modem's `GetArrisConfigurationInfo` reply
+(its Configuration page), read on 2026-11-21 with the router's session. It
+holds no identifiers. The restart (#39) sends `ethSWEthEEE` and `LedStatus`
+back unchanged, as the modem's own page does.

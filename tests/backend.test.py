@@ -341,6 +341,26 @@ def main():
              "grep -c \"option password\" /etc/config/modemhealth > /out/set_password/legacy || true; "
              "modemhealth check > /out/set_password/check.txt 2>&1",
              "modemhealth set-password < /out/pw"),
+            # Restarts (#39). With the kept session; the modem's EEE and LED
+            # settings go back as they were; the next check sees the restart.
+            ("restart_manual", config(host, PASSWORD, "/out/restart_manual/data"),
+             "modemhealth check >/dev/null; " + CTL % "eee=1&led=0",
+             "modemhealth check > /out/restart_manual/after.txt 2>&1",
+             "modemhealth restart"),
+            # No session yet: one login, then the restart.
+            ("restart_login", config(host, PASSWORD, "/out/restart_login/data"), ":", ":", "modemhealth restart manual 'by the test'"),
+            # The modem refuses: recorded as failed, no second login to try again.
+            ("restart_refused", config(host, PASSWORD, "/out/restart_refused/data"),
+             "modemhealth check >/dev/null; " + CTL % "reboot_reply=ERROR", ":", "modemhealth restart"),
+            ("restart_unreachable", config("modem:1", PASSWORD, "/out/restart_unreachable/data"), ":", ":", "modemhealth restart down 'no internet for 12 minutes'"),
+            ("restart_bad_trigger", config(host, PASSWORD, "/out/restart_bad_trigger/data"), ":",
+             "ls /out/restart_bad_trigger/data > /out/restart_bad_trigger/ls 2>&1 || true", "modemhealth restart restore"),
+            # A check and a restart at once take turns (lock): no request is
+            # refused for its timestamp, and both succeed.
+            ("restart_with_check", config(host, PASSWORD, "/out/restart_with_check/data"),
+             "modemhealth check >/dev/null; modemhealth check > /out/restart_with_check/check.txt 2>&1 & echo $! > /tmp/cpid",
+             "wait $(cat /tmp/cpid) 2>/dev/null; sleep 1",
+             "modemhealth restart"),
             ("daemon", config(host, PASSWORD, "/out/daemon/data"),
              "mkdir -p /var/state; touch /var/state/dnsmasqsec",
              "pgrep -f 'modemhealth daemon' > /out/daemon/left_running || true",
@@ -711,8 +731,61 @@ def main():
               "logout: modemhealth logout ends the session at the modem")
         check(open(os.path.join(out, "logout", "session_state")).read().strip() == "dropped", "logout: the session file is removed")
 
+        # ---------------------------------------------------------- restarts
+        def restarts_of(name):
+            f = os.path.join(out, name, "data", "restarts.csv")
+            return read_csv(f) if os.path.exists(f) else []
+
+        def events_of(name):
+            return [e["message"] for e in stored(os.path.join(out, name), "events")]
+
+        state, readings = scenario("restart_manual")
+        res = json.loads(open(os.path.join(out, "restart_manual", "output.txt")).read())
+        check(res.get("ok") is True and res.get("device") == "surfboard", "restart: the modem accepted the restart (%s)" % res)
+        check(state["reboots"] == 1 and state["forbidden_actions"] == 0, "restart: exactly one reboot, and no other action sent")
+        check(state["settings_changed"] == 0, "restart: the EEE and LED settings were sent back as the modem had them")
+        check(state["bad_signatures"] == 0 and state["stale_timestamps"] == 0, "restart: every request signed, timestamps in order")
+        rs = restarts_of("restart_manual")
+        check(len(rs) == 1 and rs[0]["trigger"] == "manual" and rs[0]["result"] == "ok" and rs[0]["detail"] == "asked for by hand"
+              and rs[0]["ts"] == str(res.get("ts")), "restart: recorded in restarts.csv (%s)" % rs)
+        check("Restarted by Modem Health: asked for by hand" in events_of("restart_manual"), "restart: recorded as an event")
+        check(state["logins"] == 2, "restart: the kept session was used, and the next check logged in again (logins %d)" % state["logins"])
+        check([r["reboot"] for r in readings] == ["0", "1"], "restart: the next check sees the modem restarted")
+
+        state, _ = scenario("restart_login")
+        res = json.loads(open(os.path.join(out, "restart_login", "output.txt")).read())
+        rs = restarts_of("restart_login")
+        check(res.get("ok") is True and state["logins"] == 1 and state["reboots"] == 1, "restart without a session: one login, one reboot")
+        check(rs and rs[0]["detail"] == "by the test", "restart: the reason given is recorded")
+
+        state, _ = scenario("restart_refused")
+        res = json.loads(open(os.path.join(out, "restart_refused", "output.txt")).read())
+        rs = restarts_of("restart_refused")
+        check(res == {"ok": False, "device": "surfboard", "reason": "restart_ERROR"}, "restart refused: reported (%s)" % res)
+        check(open(os.path.join(out, "restart_refused", "exit")).read().strip() == "1", "restart refused: exits non-zero")
+        check(state["reboots"] == 0 and state["logins"] == 1, "restart refused: no new login to try again")
+        check(len(rs) == 1 and rs[0]["result"] == "failed" and rs[0]["fail_reason"] == "restart_ERROR", "restart refused: recorded as failed")
+        check(any(m.startswith("Modem Health could not restart the modem (restart_ERROR)") for m in events_of("restart_refused")),
+              "restart refused: an event says so")
+
+        res = json.loads(open(os.path.join(out, "restart_unreachable", "output.txt")).read())
+        rs = restarts_of("restart_unreachable")
+        check(res.get("reason") == "unreachable" and rs and rs[0]["trigger"] == "down" and rs[0]["result"] == "failed",
+              "restart, modem unreachable: recorded as a failed automatic restart (%s)" % rs)
+
+        d = os.path.join(out, "restart_bad_trigger")
+        check(open(os.path.join(d, "exit")).read().strip() == "2" and json.loads(open(os.path.join(d, "output.txt")).read())["reason"] == "bad_trigger"
+              and json.load(open(os.path.join(d, "modem_state.json")))["requests"] == 0 and not restarts_of("restart_bad_trigger"),
+              "restart: an unknown trigger is refused before the modem is contacted")
+
+        state, readings = scenario("restart_with_check")
+        res = json.loads(open(os.path.join(out, "restart_with_check", "output.txt")).read())
+        check(res.get("ok") is True and state["stale_timestamps"] == 0 and state["reboots"] == 1
+              and open(os.path.join(out, "restart_with_check", "check.txt")).read().startswith("ok"),
+              "restart during a check: they take turns, and both succeed (%s)" % state)
+
         # ----------------------------------------------------------- secrecy
-        for name in ("good", "wrong_password", "unreachable"):
+        for name in ("good", "wrong_password", "unreachable", "restart_manual", "restart_refused"):
             text = files_text(os.path.join(out, name))
             check(PASSWORD not in text and "Pa ss" not in text, "%s: the password appears in no stored file or output" % name)
     finally:

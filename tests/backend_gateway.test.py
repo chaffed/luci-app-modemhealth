@@ -101,6 +101,22 @@ def main():
         steps.append("modemhealth data 0 > /out/kvd21/data.json; modemhealth status > /out/kvd21/status.json")
         # 4. A G4AR on 5G only, its API on "8080", the address with a port.
         scenario("g4ar", config("gw:%d" % g1, "DATA", "tmobile"), ctl(g1, "reset"))
+        # 4b. Restarts (#39), on the G5AR's fake before its own check (which
+        # resets the fake's request log). Off unless gw_restart=1.
+        gwr = config("gw:%d" % f1, "DATA", "tmobile")
+        pw = "echo label-password | modemhealth set-password >/dev/null; "
+        on = "uci set modemhealth.main.gw_restart=1; uci commit modemhealth; "
+        scenario("gw_restart_off", gwr, ctl(f1, "reset") + "; " + ctl(f1, "set?allow_reboot=1") + "; " + pw, command="modemhealth restart")
+        steps.append("curl -s http://gw:%d/_control/log > /out/gw_restart_off/gw_log.json" % f1)
+        scenario("gw_restart_ok", gwr, ctl(f1, "reset") + "; " + ctl(f1, "set?allow_reboot=1") + "; " + pw + on, command="modemhealth restart")
+        steps.append("curl -s http://gw:%d/_control/log > /out/gw_restart_ok/gw_log.json" % f1)
+        # A refused password: one login, then never again until it is changed.
+        scenario("gw_restart_refused", gwr, ctl(f1, "reset") + "; " + ctl(f1, "set?allow_reboot=1")
+                 + "; echo wrong | modemhealth set-password >/dev/null; " + on, command="modemhealth restart")
+        steps.append("sleep 1; modemhealth restart > /out/gw_restart_refused/again.txt; "
+                     "curl -s http://gw:%d/_control/log > /out/gw_restart_refused/gw_log.json; " % f1
+                     + "sleep 1; echo label-password | modemhealth set-password >/dev/null; modemhealth restart > /out/gw_restart_refused/changed.txt")
+        steps.append(ctl(f1, "reset"))
         # 5. A G5AR: 4G block null, no clock, two bands.
         scenario("g5ar", config("gw:%d" % f1, "DATA", "tmobile"), ctl(f1, "reset"))
         # 6. Values outside what 3GPP lets a device report.
@@ -194,6 +210,38 @@ def main():
                   and not rows(os.path.join(out, name, "data"), "radios"),
                   "%s: stored as failed with reason %s, no radios (%s)" % (name, reason, rd[0] if rd else o(name)))
         check(o("auto_nothing", "run_dir.txt").find("device") < 0, "detect: nothing answering like a gateway is not remembered as anything")
+
+        # --- restarts
+        def j(name, f="output.txt"):
+            try:
+                return json.loads(o(name, f))
+            except ValueError:
+                return {}
+
+        def gwlog(name):
+            try:
+                return [r["method"] + " " + r["path"] for r in json.loads(o(name, "gw_log.json"))]
+            except ValueError:
+                return []
+
+        check(j("gw_restart_off") == {"ok": False, "device": "tmobile", "reason": "restart_not_enabled"}
+              and not [p for p in gwlog("gw_restart_off") if p.startswith("POST")],
+              "gateway restart: off unless gw_restart=1, and nothing is sent (%s)" % o("gw_restart_off"))
+        check(j("gw_restart_ok").get("ok") is True and gwlog("gw_restart_ok")[-2:] == ["POST /TMI/v1/auth/login", "POST /TMI/v1/gateway/reset?set=reboot"],
+              "gateway restart: one login, then the reboot with its token (%s)" % gwlog("gw_restart_ok"))
+        f = os.path.join(out, "gw_restart_ok", "data", "restarts.csv")
+        rs = list(csv.DictReader(open(f))) if os.path.exists(f) else []
+        check(rs and rs[0]["result"] == "ok" and rs[0]["trigger"] == "manual", "gateway restart: recorded")
+        check(j("gw_restart_refused").get("reason") == "login_refused" and j("gw_restart_refused", "again.txt").get("reason") == "restart_password_refused_before"
+              and gwlog("gw_restart_refused").count("POST /TMI/v1/auth/login") == 1,
+              "gateway restart, refused password: one login only; never tried again (%s)" % gwlog("gw_restart_refused"))
+        check(j("gw_restart_refused", "changed.txt").get("ok") is True, "gateway restart: a changed password is tried again")
+        for name in ("gw_restart_ok", "gw_restart_refused"):
+            text = ""
+            for dp, _, names in os.walk(os.path.join(out, name)):
+                for n in names:
+                    text += open(os.path.join(dp, n), errors="replace").read()
+            check("label-password" not in text, "%s: the password appears in no stored file or output" % name)
 
         # --- Test connection
         try:

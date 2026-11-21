@@ -13,7 +13,9 @@ captures when people send them.
 
 Rules it enforces, so the tests notice a client that breaks them:
 - anything that writes (a reboot, Wi-Fi or admin changes) answers 500 with
-  "FORBIDDEN"; the request log shows it;
+  "FORBIDDEN"; the request log shows it. The one exception, for Modem
+  Health's restart (#39): with allow_reboot=1 set, POST
+  gateway/reset?set=reboot with a valid token restarts it (401 without);
 - network/telemetry needs a Bearer token from POST auth/login;
 - a wrong password answers 401; after 3 in a row it locks (as gateways do)
   and refuses even the right one;
@@ -71,6 +73,8 @@ class Gateway:
             #   restart=1      uptime starts again from 0
             #   cell=<n>       new tower id for the radios
             #   band=<b>       new band for the radios
+            #   allow_reboot=1 POST gateway/reset?set=reboot (with a token)
+            #                  restarts the gateway instead of being refused
             self.state = {}
             self.log.clear()
 
@@ -201,6 +205,14 @@ def handler_for(gw, tmi_port):
             n = int(self.headers.get("Content-Length") or 0)
             body = self.rfile.read(n) if n else b""
             gw.record("POST", self.path)
+            if (gw.state.get("allow_reboot") and url.path.rstrip("/") == "/TMI/v1/gateway/reset"
+                    and url.query == "set=reboot" and self.is_tmi_port()):
+                if not self.authorized():
+                    return self.unauthorized()
+                with gw.lock:
+                    gw.started = time.time()
+                    gw.tokens.clear()
+                return self.send(200, {"result": {"statusCode": 200}})
             if any(url.path.startswith(f) for f in FORBIDDEN):
                 return self.send(500, {"error": "FORBIDDEN: this would change the gateway"})
             if url.path.rstrip("/") == "/TMI/v1/auth/login" and self.is_tmi_port():
