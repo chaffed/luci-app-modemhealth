@@ -29,6 +29,9 @@ jobs:
       - name: Test the capture tool (what it removes before saving)
         run: python3 tests/capture.test.py
 
+      - name: Test the T-Mobile gateway capture tool (safe requests, nothing identifying kept)
+        run: python3 tests/capture_tmobile.test.py
+
       - name: Check JavaScript syntax
         run: |
           for f in $(find luci-app-modemhealth/htdocs luci-app-modemhealth/root/usr/share/modemhealth -name '*.js'); do

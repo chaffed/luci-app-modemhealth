@@ -1,0 +1,32 @@
+{
+  "_about": "Synthetic: the reply shape of an Arcadyan KVD21 as public clients document it (HINTControl's mock, tmo-monitor). Every identifier is invented. Not captured from a real gateway.",
+  "port": 80,
+  "gateway_all": {
+    "device": {
+      "friendlyName": "5G Gateway", "hardwareVersion": "R01", "isEnabled": true, "isMeshSupported": true,
+      "macId": "AC:91:9B:4E:21:7C", "manufacturer": "Arcadyan", "manufacturerOUI": "001A2A",
+      "model": "KVD21", "name": "5G Gateway", "role": "gateway", "serial": "K21B9X4471Q",
+      "softwareVersion": "1.00.18", "type": "HSID", "updateState": "latest"
+    },
+    "signal": {
+      "4g": { "bands": ["b2"], "bars": 3, "cid": 12, "eNBID": 310463, "rsrp": -100, "rsrq": -10, "rssi": -87, "sinr": 8 },
+      "5g": { "bands": ["n41"], "bars": 3, "cid": 141, "gNBID": 1588321, "rsrp": -98, "rsrq": -11, "rssi": -85, "sinr": 6 },
+      "generic": { "apn": "FBB.HOME", "hasIPv6": true, "registration": "registered", "roaming": false }
+    },
+    "time": { "daylightSavings": { "isUsed": true }, "localTime": 1785309071, "localTimeZone": "<-04>4", "upTime": 30996 }
+  },
+  "cell": {
+    "cell": {
+      "4g": { "bandwidth": "15M", "cqi": 9, "earfcn": "875", "ecgi": "3102607947854", "mcc": "310", "mnc": "260", "pci": "63", "plmn": "310260",
+              "sector": { "bands": ["b2"], "bars": 3, "cid": 12, "eNBID": 310463, "rsrp": -100, "rsrq": -10, "rssi": -87, "sinr": 8 }, "status": true, "supportedBands": ["b2", "b4", "b12", "b66", "b71"], "tac": "33017" },
+      "5g": { "bandwidth": "100M", "cqi": 12, "earfcn": "520110", "ecgi": "31026065060497", "mcc": "310", "mnc": "260", "pci": "455", "plmn": "310260",
+              "sector": { "bands": ["n41"], "bars": 3, "cid": 141, "gNBID": 1588321, "rsrp": -98, "rsrq": -11, "rssi": -85, "sinr": 6 }, "status": true, "supportedBands": ["n41", "n71"], "tac": "33017" },
+      "generic": { "apn": "FBB.HOME", "hasIPv6": true, "registration": "registered", "roaming": false },
+      "gps": { "latitude": 39.7392481, "longitude": -104.9902511 }
+    }
+  },
+  "sim": { "sim": { "iccId": "8901260853795128460", "imei": "359618092214785", "imsi": "310260518735420", "msisdn": "17205550143", "status": true } },
+  "clients": { "clients": { "2.4ghz": [], "5.0ghz": [ { "connected": true, "ipv4": "192.168.12.151", "ipv6": ["fe80::1c4a:9bff:fe31:7d20"], "mac": "3C:22:FB:91:0A:7E", "name": "Alex-iPhone", "signal": -52 } ], "ethernet": [ { "connected": true, "ipv4": "192.168.12.187", "ipv6": [], "mac": "94:83:C4:2A:5B:10", "name": "GL-BE9300" } ] } },
+  "ap": { "2.4ghz": { "isRadioEnabled": true }, "ssids": [ { "ssidName": "Lopez-Home-5G", "wpaKey": "correct horse battery 42", "encryptionMode": "AES" } ] },
+  "version": { "version": 1 }
+}
