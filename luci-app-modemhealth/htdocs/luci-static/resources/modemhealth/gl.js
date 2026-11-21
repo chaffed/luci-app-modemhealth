@@ -747,8 +747,8 @@
 				E('div', { 'class': 'mhgl-section' }, [
 					E('h3', {}, [ _('Health limits') ]),
 					E('p', { 'class': 'cbi-map-descr' }, [ _('What counts as good, acceptable (marginal) and out of spec. Leave a field empty to use Modem Health\'s default, which comes from the DOCSIS specifications and manufacturers\' guidance where they publish one. The dashboard and the report say which limits you changed, and that the default\'s sources no longer back them.') ]),
-					limitGroup(_('Signal levels'), all.filter(function(it) { return /^(ds_|us_)/.test(it.key); })),
-					limitGroup(_('Events'), all.filter(function(it) { return !/^(ds_|us_)/.test(it.key); }))
+					limitGroup(_('Signal levels'), all.filter(function(it) { return /^(ds_|us_|lte_|nr_)/.test(it.key); })),
+					limitGroup(_('Events'), all.filter(function(it) { return !/^(ds_|us_|lte_|nr_)/.test(it.key); }))
 				])
 			]));
 

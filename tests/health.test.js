@@ -69,6 +69,52 @@ testChannel('us OFDMA', { dir: 'us', modulation: 'OFDMA' }, 'power', H.LIMITS.us
 	testChannel('us SC-QAM with ' + n + ' channel(s)', { dir: 'us', modulation: 'SC-QAM' }, 'power', H.LIMITS.us_power_by_channels[n], n);
 });
 
+/* --------------------------------------------------- a gateway's radios */
+[ 'lte', 'nr' ].forEach(function(tech) {
+	[ [ 'rsrp', 'rsrp_dbm' ], [ 'rsrq', 'rsrq_db' ], [ 'sinr', 'sinr_db' ] ].forEach(function(m) {
+		var limit = H.LIMITS[tech + '_' + m[0]];
+		edges(limit).forEach(function(v) {
+			var r = { tech: tech, rsrp_dbm: '-80', rsrq_db: '-8', sinr_db: '25' };
+			r[m[1]] = String(v);
+			var got = H.radioVerdict(r).checks.filter(function(x) { return x.metric === m[0]; })[0];
+			eq(got && got.level, expectBand(v, limit), tech + ' ' + m[0] + ' ' + v);
+		});
+	});
+});
+['lte_rsrp', 'lte_rsrq', 'lte_sinr', 'nr_rsrp', 'nr_rsrq', 'nr_sinr'].forEach(function(k) {
+	var L = H.LIMITS[k];
+	ok(L.sources.indexOf('teltonika_signal') >= 0 && L.sources.some(function(s) { return H.SOURCES[s].kind === 'spec'; }) &&
+		L.sources.every(function(s) { return H.SOURCES[s].kind !== 'spec' || /reporting range/.test(H.SOURCES[s].title); }),
+		k + ': graded by vendor guidance; the only spec cited is the 3GPP reporting range');
+});
+eq([ H.radioVerdict({ tech: 'nr', rsrp_dbm: '-89' }).level, H.radioVerdict({ tech: 'nr', rsrp_dbm: '-95' }).level,
+	H.radioVerdict({ tech: 'nr', rsrp_dbm: '-101' }).level, H.radioVerdict({ tech: 'nr', sinr_db: '0' }).level,
+	H.radioVerdict({ tech: 'lte', rsrq_db: '-20' }).level ],
+	[ 'good', 'marginal', 'bad', 'bad', 'bad' ], 'radio: Teltonika\'s grades (-90/-100 dBm RSRP; SINR 0 and RSRQ -20 dB are poor)');
+eq(H.radioVerdict({ tech: 'nr', rsrp_dbm: '', rsrq_db: '', sinr_db: '', rssi_dbm: '-60', bars: '1' }).level, 'unknown',
+	'radio: no judged value (stored empty because out of the 3GPP range) is unknown, not good; RSSI and bars are not judged');
+var gwReading = { result: 'ok', connectivity: 'registered' };
+var goodR = { tech: 'nr', bands: 'n41', rsrp_dbm: '-85', rsrq_db: '-10', sinr_db: '20' };
+eq(H.readingVerdict(gwReading, [], null, [ goodR ]).level, 'healthy', 'gateway: a good radio on a registered gateway is healthy');
+var weak = H.readingVerdict(gwReading, [], null, [ goodR, { tech: 'lte', bands: 'b66', rsrp_dbm: '-110', rsrq_db: '-12', sinr_db: '5' } ]);
+eq([ weak.level, weak.reasons.map(function(r) { return r.kind + ':' + r.level; }) ], [ 'failing', [ 'lte_rsrp:bad', 'lte_sinr:marginal' ] ],
+	'gateway: a weak 4G radio fails the reading, worst reason first');
+eq(H.readingVerdict(gwReading, [], null, []).reasons.map(function(r) { return r.kind; }), [ 'no_radio' ], 'gateway: no radio connected is failing');
+eq(H.readingVerdict({ result: 'ok', connectivity: 'searching' }, [], null, [ goodR ]).reasons.map(function(r) { return r.kind + ':' + r.detail; }),
+	[ 'not_registered:searching' ], 'gateway: not registered on the network is failing');
+eq(H.readingVerdict({ result: 'ok', connectivity: 'registered' }, [ { dir: 'ds', lock: 'Locked', power_dbmv: '0', snr_db: '40' } ]).reasons.map(function(r) { return r.kind; }),
+	[ 'not_operational' ], 'a cable modem reading is judged as before (radios not given)');
+eq(H.readingVerdict({ result: 'failed', reason: 'timeout' }, [], null, [ goodR ]).level, 'unknown', 'gateway: a failed reading is unknown, never judged');
+eq([ 'Tower change on 5G: 1588321-141 to 1777001-141', 'Band change on 4G: b2 to b66', '5G radio no longer connected', 'Tower change at the modem' ].map(H.classifyEvent),
+	[ 'cell_change', 'band_change', 'radio_lost', 'other' ], 'events: the gateway events Modem Health writes are recognised, nothing else');
+ok(H.DISRUPTIVE.cell_change && H.DISRUPTIVE.radio_lost && !H.DISRUPTIVE.band_change, 'events: tower changes and lost radios count as disruptions; band changes do not');
+var pv = H.periodVerdict({ hours: 24, readings: [ { level: 'healthy' } ],
+	events: [ 1, 2, 3 ].map(function() { return { kind: 'cell_change' }; }).concat([ { kind: 'radio_lost' } ]) });
+eq(pv.reasons.map(function(r) { return r.kind + ':' + r.level; }).sort(), [ 'cell_change:marginal', 'radio_lost:marginal' ],
+	'period: 3 tower changes and a lost radio in a day are marginal');
+eq(H.periodVerdict({ hours: 24, readings: [ { level: 'healthy' } ], events: [ { kind: 'cell_change' }, { kind: 'cell_change' }, { kind: 'band_change' } ] }).level,
+	'healthy', 'period: two tower changes a day (gateways report brief false ones) and band changes are not held against the line');
+
 /* --------------------------------------------------------- lock and gaps */
 eq(H.channelVerdict({ dir: 'ds', lock: 'Not Locked', modulation: '256QAM', power_dbmv: '0', snr_db: '40' }).level, 'bad', 'an unlocked channel is bad');
 eq(H.channelVerdict({ dir: 'ds', lock: 'Locked', modulation: '256QAM', power_dbmv: '', snr_db: '' }).checks, [], 'missing values are not judged');
@@ -159,7 +205,7 @@ eq(H.periodVerdict({ hours: 24, readings: [ { level: 'unknown' } ], events: [] }
 /* ----------------------------------------------- limits from the settings */
 var none = H.applySettings(function() { return ''; });
 eq([ none.changed.length, JSON.stringify(none.limits) === JSON.stringify(H.LIMITS) ], [ 0, true ], 'settings: empty settings leave every default');
-eq(H.limitList().length, 17, 'settings: 17 limits with bounds (us_power_1 ... us_power_4 among them)');
+eq(H.limitList().length, 25, 'settings: 25 limits with bounds (us_power_1 ... us_power_4 and the 4G/5G ones among them)');
 ok(H.limitList().every(function(it) { return H.limitFields(it.key, it.limit).length > 0; }), 'settings: each has at least one bound to set');
 eq(H.limitFields('ds_snr', H.LIMITS.ds_snr).map(function(f) { return f.option; }), [ 'ds_snr_good_min', 'ds_snr_acceptable_min' ],
 	'settings: a limit without an upper bound gets none');

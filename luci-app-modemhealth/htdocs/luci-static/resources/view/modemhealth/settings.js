@@ -27,7 +27,7 @@ var REASONS = {
 
 var H = mh.health;
 var BOUND_TEXT = { good_min: _('good from'), good_max: _('good up to'), acceptable_min: _('acceptable from'), acceptable_max: _('acceptable up to') };
-var SIGNAL = /^(ds_|us_)/;
+var SIGNAL = /^(ds_|us_|lte_|nr_)/;
 
 /* The health limits: one field per bound, empty = the default. */
 function limitsSection(m) {
