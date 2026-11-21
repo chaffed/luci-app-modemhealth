@@ -84,6 +84,37 @@ function channelTable(verdicts, dir) {
 	}))));
 }
 
+/* A gateway's radios at its latest reading. */
+function radioTable(verdicts) {
+	if (!verdicts || !verdicts.length) return E('p', {}, [ _('No 4G or 5G radio was connected at the last check.') ]);
+	var head = [ _('Radio'), _('Band'), _('Bars'), _('RSRP (dBm)'), _('RSRQ (dB)'), _('SINR (dB)'), _('RSSI (dBm)'), _('Tower (eNB/gNB-cell)') ];
+	return E('div', { 'class': 'mh-tablewrap' }, E('table', { 'class': 'table' }, [
+		E('tr', { 'class': 'tr table-titles' }, head.map(function(h) { return E('th', { 'class': 'th' }, [ h ]); }))
+	].concat(verdicts.slice().sort(function(a, b) { return a.radio.tech < b.radio.tech ? -1 : 1; }).map(function(v) {
+		var r = v.radio, chk = {};
+		v.checks.forEach(function(x) { chk[x.metric] = x; });
+		return E('tr', { 'class': 'tr' }, [
+			E('td', { 'class': 'td' }, [ r.tech === 'nr' ? _('5G (NR)') : _('4G (LTE)') ]),
+			E('td', { 'class': 'td' }, [ r.bands || '–' ]),
+			/* Reported, not judged: the gateway's own summary. */
+			E('td', { 'class': 'td' }, [ r.bars || '–' ]),
+			cell(mh.fmtNum(r.rsrp_dbm), chk.rsrp),
+			cell(mh.fmtNum(r.rsrq_db), chk.rsrq),
+			cell(mh.fmtNum(r.sinr_db), chk.sinr),
+			E('td', { 'class': 'td' }, [ mh.fmtNum(r.rssi_dbm) ]),
+			E('td', { 'class': 'td' }, [ r.cell || '–' ])
+		]);
+	}))));
+}
+
+/* Points over time from each reading's radios of one kind (lte, nr). */
+function radioSeries(D, tech, key) {
+	return D.readings.map(function(r) {
+		var x = ((D.radiosAt || {})[r.ts] || []).filter(function(y) { return y.tech === tech; })[0];
+		return [ +r.ts, x ? H.num(x[key]) : null ];
+	});
+}
+
 /* Points over time from each reading's channels. */
 function seriesBy(D, dir, pick, agg) {
 	return D.readings.map(function(r) {
@@ -112,7 +143,7 @@ function charts(D) {
 	var marks = D.events.filter(function(e) { return H.DISRUPTIVE[e.kind]; }).map(function(e) {
 		return { ts: e.ts, color: mh.C.bad, label: '%s · %s'.format(mh.fmtTime(e.ts), e.message) };
 	});
-	D.reboots.forEach(function(r) { marks.push({ ts: +r.boot_ts || +r.ts, color: '#8e44ad', label: _('Modem restarted') }); });
+	D.reboots.forEach(function(r) { marks.push({ ts: +r.boot_ts || +r.ts, color: '#8e44ad', label: D.gateway ? _('Gateway restarted') : _('Modem restarted') }); });
 	var scqam = function(c) { return /OFDM/.test(c.modulation || '') ? null : H.num(c.power_dbmv); };
 	var snr = function(c) { return /OFDM/.test(c.modulation || '') ? null : H.num(c.snr_db); };
 	var mer = function(c) { return /OFDM/.test(c.modulation || '') ? H.num(c.snr_db) : null; };
@@ -126,6 +157,23 @@ function charts(D) {
 		return E('div', { 'class': 'cbi-section' }, [ E('h3', {}, [ title ]), note ? E('p', { 'class': 'mh-note' }, [ note ]) : '', leg || '', chart ]);
 	};
 	var out = [];
+	if (D.gateway) {
+		var techs = [ [ 'lte', _('4G (LTE)'), mh.C.series[0] ], [ 'nr', _('5G (NR)'), mh.C.series[1] ] ].filter(function(t) {
+			return D.readings.some(function(r) { return ((D.radiosAt || {})[r.ts] || []).some(function(x) { return x.tech === t[0]; }); });
+		});
+		var leg = mh.legend(techs.map(function(t) { return { name: t[1], color: t[2] }; }).concat([ { name: _('outage'), color: mh.C.bad, faint: true } ]));
+		[ [ 'rsrp_dbm', _('Signal power (RSRP, dBm)'), _('How strong the tower\'s signal is at the gateway.'), 'rsrp' ],
+		  [ 'sinr_db', _('Signal to noise (SINR, dB)'), _('How far the signal stands above interference and noise.'), 'sinr' ],
+		  [ 'rsrq_db', _('Signal quality (RSRQ, dB)'), _('How much of the received power is the gateway\'s own signal rather than other traffic.'), 'rsrq' ] ].forEach(function(m) {
+			var limit = D.limits[(techs[0] || [ 'nr' ])[0] + '_' + m[3]];
+			out.push(block(m[1], m[2] + ' ' + _('Shaded: good (green) and acceptable (amber), by Teltonika\'s guidance; neither 3GPP nor T-Mobile publishes grades.'),
+				mh.lineChart(Object.assign({ title: m[1], bands: bandsFor(limit), series: techs.map(function(t) {
+					return { name: t[1], color: t[2], points: radioSeries(D, t[0], m[0]) };
+				}) }, common)), leg));
+		});
+		out.push(E('p', { 'class': 'mh-note' }, [ _('Red ticks at the top of each chart mark tower changes and lost radios; purple ticks mark gateway restarts. Hover for details.') ]));
+		return out;
+	}
 	out.push(block(_('Downstream power'), _('Lowest and highest SC-QAM channel at each check. Shaded: good (green) and acceptable (amber) range.'),
 		mh.lineChart(Object.assign({ title: _('Downstream power'), fitBands: false, bands: bandsFor(D.limits.ds_power), series: [
 			{ name: _('lowest'), color: mh.C.series[0], points: seriesBy(D, 'ds', scqam, min) },
@@ -171,10 +219,11 @@ function charts(D) {
 
 function eventsTable(D) {
 	var evs = D.events.filter(function(e) { return e.kind !== 'status_report'; }).slice(-60).reverse();
-	if (!evs.length) return E('p', {}, [ _('No modem events in this period.') ]);
+	if (!evs.length) return E('p', {}, [ D.gateway ? _('No tower or band changes in this period.') : _('No modem events in this period.') ]);
 	var KIND = {
 		t4: _('T4 time-out'), t3: _('T3 time-out'), t2: _('T2 time-out'), t6: _('T6 time-out'), sync_loss: _('Loss of sync'),
-		mdd_loss: _('Lost MDD'), registration: _('Registration'), ranging: _('Ranging'), reboot: _('Restart'), config: _('Configuration'), other: ''
+		mdd_loss: _('Lost MDD'), registration: _('Registration'), ranging: _('Ranging'), reboot: _('Restart'), config: _('Configuration'),
+		cell_change: _('Tower change'), band_change: _('Band change'), radio_lost: _('Radio lost'), other: ''
 	};
 	return E('div', { 'class': 'mh-tablewrap' }, E('table', { 'class': 'table mh-events' }, [
 		E('tr', { 'class': 'tr table-titles' }, [ _('Time'), _('Level'), _('What'), _('Message') ].map(function(h) { return E('th', { 'class': 'th' }, [ h ]); }))
@@ -215,8 +264,16 @@ function listOrNone(items, none) {
 	return items.length ? E('ul', {}, items.map(function(t) { return E('li', {}, [ t ]); })) : E('p', {}, [ none ]);
 }
 
-function explanations() {
-	var items = [
+function explanations(gateway) {
+	var items = gateway ? [
+		[ _('RSRP'), _('How strong the tower\'s signal is at the gateway, in dBm. Closer to zero is stronger: -80 is excellent, below -100 is weak.') ],
+		[ _('SINR'), _('How far the signal stands above interference and noise, in dB. Higher is better; at 0 dB or below the gateway can barely hold the connection.') ],
+		[ _('RSRQ'), _('Signal quality: how much of what the gateway receives is its own signal rather than other traffic on the tower. Closer to zero is better.') ],
+		[ _('RSSI and bars'), _('The total power received, and the gateway\'s own summary of the signal. Shown, but not judged.') ],
+		[ _('Tower change'), _('The gateway moved to another tower or sector. A gateway that stays in one place should rarely do so; frequent changes mean it cannot hold one.') ],
+		[ _('Where the grades come from'), _('Neither 3GPP (which writes the 4G and 5G standards) nor T-Mobile publishes what counts as good. The grades are Teltonika\'s published recommendations, which Digi\'s agree with.') ],
+		[ _('Outage'), _('No answer from the internet at a check. "Line down" means the gateway still answered; "gateway unreachable" means it did not either.') ]
+	] : [
 		[ _('Downstream power'), _('How strong the signal from the ISP is when it reaches the modem. Too weak or too strong and the modem makes errors.') ],
 		[ _('SNR / MER'), _('How far the signal stands above the noise on the line. Lower means more errors; a sudden drop often means interference or a damaged cable or connector.') ],
 		[ _('Upstream power'), _('How loud the modem has to transmit for the ISP to hear it. Close to the maximum means signal is being lost between the modem and the ISP; the modem has no headroom left.') ],
@@ -263,14 +320,16 @@ return view.extend({
 		var self = this;
 		var last = D.readings[D.readings.length - 1];
 		var lastV = last ? last.verdict : null;
-		var setup = !st.password_set ? E('div', { 'class': 'alert-message warning' }, [
+		var gw = D.gateway || st.modem_type === 'tmobile' || (st.modem || {}).type === 'tmobile';
+		var setup = !st.password_set && !gw ? E('div', { 'class': 'alert-message warning' }, [
 			_('Modem Health needs your modem\'s password before it can read the modem. '),
 			E('a', { 'href': L.url('admin/services/modemhealth/settings') }, [ _('Open Settings') ])
 		]) : '';
 		var sched = st.enabled
 			? (st.next_check ? _('Next check at %s.').format(mh.fmtTime(st.next_check).split(' ')[1]) : (st.synced === false ? _('Waiting for the router\'s clock to be set.') : ''))
 			: _('Scheduled checks are off.');
-		var periodReasons = D.period.reasons.slice(0, 6).map(function(r) { return mh.reasonText(r, D.period.hours); });
+		var gwNow = D.gateway || st.modem_type === 'tmobile' || (st.modem || {}).type === 'tmobile';
+		var periodReasons = D.period.reasons.slice(0, 6).map(function(r) { return mh.reasonText(r, D.period.hours, gwNow); });
 		var lastReasons = lastV ? mh.groupReasons(lastV.reasons).slice(0, 6).map(function(g) { return mh.groupedText(g); }) : [];
 		var modem = st.modem || {};
 		return E('div', {}, [
@@ -280,7 +339,7 @@ return view.extend({
 					E('h3', {}, [ _('Now') ]),
 					lastV ? badge(lastV.level === 'unknown' ? 'unknown' : lastV.level) : badge('unknown'),
 					E('p', {}, [ last ? _('Last check: %s.').format(mh.fmtTime(+last.ts)) : _('No checks yet.'), ' ', sched ]),
-					listOrNone(lastReasons, lastV && lastV.level === 'healthy' ? _('All channels within spec.') : ''),
+					listOrNone(lastReasons, lastV && lastV.level === 'healthy' ? (gw ? _('Every radio within the good range.') : _('All channels within spec.')) : ''),
 					E('button', { 'class': 'cbi-button cbi-button-action', 'click': ui.createHandlerFn(this, function() {
 						/* The call answers with the status after the check. */
 						return mh.callCheck().then(redraw);
@@ -293,8 +352,8 @@ return view.extend({
 					listOrNone(periodReasons, D.period.level === 'healthy' ? _('No problems found in this period.') : '')
 				]),
 				E('div', {}, [
-					E('h3', {}, [ _('Modem') ]),
-					E('p', {}, [ [ modem.model, modem.docsis ].filter(Boolean).join(' · ') || _('Not read yet.') ]),
+					E('h3', {}, [ gw ? _('Gateway') : _('Modem') ]),
+					E('p', {}, [ [ modem.model, gw ? _('T-Mobile 5G gateway') : modem.docsis ].filter(Boolean).join(' · ') || _('Not read yet.') ]),
 					E('p', { 'class': 'mh-note' }, [ modem.firmware ? _('Firmware %s').format(modem.firmware) : '', E('br'), modem.mac ? _('MAC %s').format(modem.mac) : '' ])
 				])
 			])
@@ -308,21 +367,22 @@ return view.extend({
 			if (newStatus && newStatus.now) st = newStatus;
 			return self.loadPeriod(st).then(function(D) {
 				var latest = D.readings.filter(function(r) { return r.result === 'ok'; }).pop();
-				var lv = latest ? latest.verdict : { channels: [] };
+				var lv = latest ? latest.verdict : { channels: [], radios: [] };
+				var unreachable = D.gateway ? _('gateway unreachable') : _('modem unreachable');
 				var picker = E('select', { 'class': 'cbi-input-select', 'change': function(ev) { self.days = +ev.target.value; draw(); } },
 					PERIODS.map(function(p) { return E('option', { 'value': p[0], 'selected': p[0] === self.days ? '' : null }, [ p[1] ]); }));
 				var outageItems = D.outages.map(function(o) {
-					return _('%s: %s, at least %s%s.').format(mh.fmtTime(o.start), o.kind === 'line_down' ? _('line down') : _('modem unreachable'),
+					return _('%s: %s, at least %s%s.').format(mh.fmtTime(o.start), o.kind === 'line_down' ? _('line down') : unreachable,
 						mh.fmtDuration(o.minS), o.ongoing ? _(', still down') : (o.maxS != null ? _(', at most %s').format(mh.fmtDuration(o.maxS)) : ''));
 				});
-				var restartItems = D.reboots.map(function(r) { return _('Modem restarted at %s.').format(mh.fmtTime(+r.boot_ts || +r.ts)); })
+				var restartItems = D.reboots.map(function(r) { return (D.gateway ? _('Gateway restarted at %s.') : _('Modem restarted at %s.')).format(mh.fmtTime(+r.boot_ts || +r.ts)); })
 					.concat(D.reregistrations.map(function(r) { return _('Re-registered (modem time %s).').format(r.time); }));
 				var body = [
 					E('style', {}, [ CSS ]),
 					E('h2', {}, [ _('Modem Health') ]),
 					E('p', {}, [ _('Period: '), picker, ' ',
 						E('span', { 'class': 'mh-note' }, [ _('Download as CSV:') ]), ' ' ].concat([
-						[ 'readings', _('Checks') ], [ 'channels', _('Channels') ], [ 'events', _('Events') ]
+						[ 'readings', _('Checks') ], D.gateway ? [ 'radios', _('Radios') ] : [ 'channels', _('Channels') ], [ 'events', _('Events') ]
 					].map(function(k) {
 						return E('button', { 'class': 'cbi-button', 'style': 'margin-left:.3em', 'click': function() { self.download(D, k[0]); } }, [ k[1] ]);
 					}))),
@@ -334,17 +394,26 @@ return view.extend({
 					]) : '',
 					E('div', { 'class': 'cbi-section' }, [ E('h3', {}, [ _('Outages') ]), listOrNone(outageItems, _('No outages in this period.')) ]),
 					E('div', { 'class': 'cbi-section' }, [ E('h3', {}, [ _('Restarts and re-registrations') ]), listOrNone(restartItems, _('None in this period.')) ]),
+				].concat(D.gateway ? [
+					E('div', { 'class': 'cbi-section', 'id': 'mh-radios' }, [
+						E('h3', {}, [ _('4G and 5G radios') ]),
+						E('p', { 'class': 'mh-note' }, [ latest ? _('At %s. Hover a value for its limit. Bars and RSSI are shown as the gateway reports them, not judged.').format(mh.fmtTime(+latest.ts)) : '' ]),
+						radioTable(lv.radios)
+					])
+				] : [
 					E('div', { 'class': 'cbi-section' }, [
 						E('h3', {}, [ _('Downstream channels') ]),
 						E('p', { 'class': 'mh-note' }, [ latest ? _('At %s. Corrected and uncorrectable: since the previous check. Hover a value for its limit.').format(mh.fmtTime(+latest.ts)) : '' ]),
 						channelTable(lv.channels, 'ds')
 					]),
 					E('div', { 'class': 'cbi-section' }, [ E('h3', {}, [ _('Upstream channels') ]), channelTable(lv.channels, 'us') ])
-				].concat(D.readings.length ? charts(D) : []).concat([
-					E('div', { 'class': 'cbi-section' }, [ E('h3', {}, [ _('Modem events') ]),
-						E('p', { 'class': 'mh-note' }, [ _('From the modem\'s own log, kept by the router after the modem has forgotten them. Routine status reports are not shown.') ]),
+				]).concat(D.readings.length ? charts(D) : []).concat([
+					E('div', { 'class': 'cbi-section' }, [ E('h3', {}, [ D.gateway ? _('Gateway events') : _('Modem events') ]),
+						E('p', { 'class': 'mh-note' }, [ D.gateway
+							? _('The gateway keeps no event log; these are written by Modem Health when a check finds another tower, another band or a radio gone.')
+							: _('From the modem\'s own log, kept by the router after the modem has forgotten them. Routine status reports are not shown.') ]),
 						eventsTable(D) ]),
-					explanations()
+					explanations(D.gateway)
 				]);
 				root.replaceChildren.apply(root, body);
 			}).catch(function(err) {

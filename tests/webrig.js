@@ -82,7 +82,7 @@ exports.start = async function(opts) {
 			'-v', path.join(ROOT, 'tests') + ':/tests:ro', '-v', rig.out + ':/out', IMAGE, '/sbin/init' ]);
 
 		rig.now = Math.floor(Date.now() / 1000);
-		rig.made = gen.make(rig.now, opts.days || 3, opts.gen || { hostile: true });
+		rig.made = opts.make ? opts.make(rig.now) : gen.make(rig.now, opts.days || 3, opts.gen || { hostile: true });
 		gen.write(path.join(rig.out, 'seed'), rig.made);
 
 		for (var i = 0; i < 100; i++) {

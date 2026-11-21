@@ -74,6 +74,9 @@ jobs:
       - name: Test the GL.iNet admin panel pages with a browser (stand-in panel, real module)
         run: node tests/gl.test.js
 
+      - name: Test a T-Mobile gateway's pages with a browser (LuCI and the stand-in panel)
+        run: node tests/gateway_pages.test.js
+
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -81,6 +84,7 @@ jobs:
           path: |
             .test-out/luci/*.png
             .test-out/gl/*.png
+            .test-out/gateway/*.png
           if-no-files-found: ignore
 
       - name: Build ipk

@@ -108,7 +108,25 @@ function assemble(d) {
 		e.ts = eventTime(e);
 		return e;
 	});
-	return { readings: parseCSV(d.readings), channels: channels, channelsAt: byTs, events: events, speed: speedData(d.speed) };
+	var radios = parseCSV(d.radios), radiosAt = {};
+	radios.forEach(function(r) { (radiosAt[r.ts] = radiosAt[r.ts] || []).push(r); });
+	return { readings: parseCSV(d.readings), channels: channels, channelsAt: byTs, radios: radios, radiosAt: radiosAt,
+		events: events, speed: speedData(d.speed) };
+}
+
+/* A reading of a T-Mobile gateway rather than a cable modem: it has radios,
+ * or (no radio connected at all) no channels and a cellular registration
+ * state. */
+function isGateway(r, D) {
+	if ((D.radiosAt || {})[r.ts]) return true;
+	return !(D.channelsAt || {})[r.ts] && /registered|searching|denied/i.test(r.connectivity || '') && !/operational/i.test(r.connectivity || '');
+}
+
+/* readingVerdict with a gateway's radios when the reading is a gateway's. */
+function verdictOf(r, D, limits) {
+	return isGateway(r, D)
+		? health.readingVerdict(r, [], limits, (D.radiosAt || {})[r.ts] || [])
+		: health.readingVerdict(r, (D.channelsAt || {})[r.ts] || [], limits);
 }
 
 /* The speed tests of several pieces of a period as one. */
@@ -144,7 +162,7 @@ function load(since, until, intervalMin) {
 				return i ? t.slice(t.indexOf('\n') + 1) : t;
 			}).join('');
 		};
-		var D = assemble({ readings: join('readings'), channels: join('channels'), events: join('events'), channelmap: join('channelmap') });
+		var D = assemble({ readings: join('readings'), channels: join('channels'), events: join('events'), radios: join('radios'), channelmap: join('channelmap') });
 		D.speed = parts.reduce(function(all, p) { return addSpeed(all, speedData((p || {}).speed)); }, null);
 		D.since = since; D.until = until;
 		D.events = D.events.filter(inPeriod(since, until)).sort(function(a, b) { return a.ts - b.ts; });
@@ -158,8 +176,28 @@ function load(since, until, intervalMin) {
  * tally, and the channel rows themselves are let go. */
 function reduce(G, P) {
 	P.readings.forEach(function(r) {
-		var rows = P.channelsAt[r.ts] || [], v = health.readingVerdict(r, rows, G.limits);
-		var a = { dsPowerMin: null, dsPowerMax: null, snrMin: null, merMin: null, us: {}, unc: null, corr: null, unlocked: 0 };
+		var v = verdictOf(r, P, G.limits);
+		var a = { dsPowerMin: null, dsPowerMax: null, snrMin: null, merMin: null, us: {}, unc: null, corr: null, unlocked: 0, radio: {} };
+		if (isGateway(r, P)) G.gateway = true;
+		/* A gateway's radios: the figures for the charts, and a tally per
+		 * radio (4G, 5G). */
+		(v.radios || []).forEach(function(rv) {
+			var x = rv.radio, t = G.radios[x.tech];
+			var nums = { rsrp: health.num(x.rsrp_dbm), rsrq: health.num(x.rsrq_db), sinr: health.num(x.sinr_db), rssi: health.num(x.rssi_dbm) };
+			a.radio[x.tech] = nums;
+			if (!t) t = G.radios[x.tech] = { tech: x.tech, n: 0, marginal: 0, bad: 0, bands: {}, cells: {} };
+			t.n++;
+			if (rv.level === health.MARGINAL) t.marginal++;
+			if (rv.level === health.BAD) t.bad++;
+			if (x.bands) t.bands[x.bands] = (t.bands[x.bands] || 0) + 1;
+			if (x.cell) t.cells[x.cell] = (t.cells[x.cell] || 0) + 1;
+			Object.keys(nums).forEach(function(k) {
+				var val = nums[k];
+				if (val == null) return;
+				if (t[k + 'Min'] == null || val < t[k + 'Min']) t[k + 'Min'] = val;
+				if (t[k + 'Max'] == null || val > t[k + 'Max']) t[k + 'Max'] = val;
+			});
+		});
 		var low = function(k, x) { if (x != null && (a[k] == null || x < a[k])) a[k] = x; };
 		v.channels.forEach(function(cv) {
 			var c = cv.channel, ofdm = /OFDM/.test(c.modulation || ''), p = health.num(c.power_dbmv), q = health.num(c.snr_db);
@@ -208,7 +246,7 @@ function reduce(G, P) {
  *    .latest the newest good reading with its channels. */
 function loadDigest(since, until, intervalMin, limits, progress) {
 	var G = { since: since, until: until, interval: intervalMin || 5, limits: limits || health.LIMITS,
-		readings: [], events: [], channels: {}, latest: null, speed: null, judged: true };
+		readings: [], events: [], channels: {}, radios: {}, gateway: false, latest: null, speed: null, judged: true };
 	var todo = pieces(since, until, intervalMin), i = 0;
 	var next = function() {
 		if (i >= todo.length) {
@@ -232,8 +270,10 @@ function loadDigest(since, until, intervalMin, limits, progress) {
 function analyse(D, intervalMin, limits) {
 	D.limits = limits = limits || health.LIMITS;
 	/* A digest's readings are judged already (see reduce). */
-	if (!D.judged)
-		D.readings.forEach(function(r) { r.verdict = health.readingVerdict(r, D.channelsAt[r.ts] || [], limits); });
+	if (!D.judged) {
+		D.readings.forEach(function(r) { r.verdict = verdictOf(r, D, limits); });
+		D.gateway = D.readings.some(function(r) { return isGateway(r, D); });
+	}
 	var outages = health.outages(D.readings, Math.max(1800, (intervalMin || 5) * 60 * 3));
 	var disruptive = D.events.filter(function(e) { return e.kind !== 'login'; });
 	var hours = Math.max((D.until - D.since) / 3600, 1 / 60);
@@ -316,7 +356,7 @@ function fmtLimit(limit) {
 
 /* Plain-language reason for the summary. hours: length of the period;
  * rates "a day" are only quoted for periods of a day or more. */
-function reasonText(r, hours) {
+function reasonText(r, hours, gateway) {
 	var L = r.limit || {};
 	var rate = function() {
 		return hours >= 24 ? _(', %.1f a day').format(r.perDay) : (hours ? _(' in %s').format(fmtDuration(hours * 3600)) : '');
@@ -325,14 +365,20 @@ function reasonText(r, hours) {
 	case 'failed_reading': return _('The last check could not read the modem (%s).').format(r.detail || '?');
 	case 'not_operational': return _('The modem reports it is not operational (%s).').format(r.detail || '?');
 	case 'no_downstream': return _('No downstream channels are locked.');
+	case 'not_registered': return _('The gateway is not registered on the mobile network (%s).').format(r.detail || '?');
+	case 'no_radio': return _('No 4G or 5G radio is connected.');
+	case 'cell_change': return _('%d tower change(s)%s.').format(r.count, rate());
+	case 'radio_lost': return _('%d time(s) the 4G or 5G connection was lost%s.').format(r.count, rate());
 	case 'outage': return _('%d outage(s) with no internet.').format(r.count);
 	case 't4': return _('%d T4 time-out(s): the modem lost its connection and searched for the signal again.').format(r.count);
 	case 't3': return _('%d T3 time-out(s)%s: the ISP did not answer the modem.').format(r.count, rate());
 	case 'sync_loss': return _('%d loss(es) of downstream sync%s.').format(r.count, rate());
-	case 'reboot': return _('%d modem restart(s)%s.').format(r.count, rate());
+	case 'reboot': return (gateway ? _('%d gateway restart(s)%s.') : _('%d modem restart(s)%s.')).format(r.count, rate());
 	case 'readings_out_of_spec': return _('%.0f%% of checks found a value out of spec.').format(r.share * 100);
 	case 'readings_marginal': return _('%.0f%% of checks found a marginal value.').format(r.share * 100);
 	}
+	if (r.radio)
+		return _('%s on %s: %s %s (%s).').format(L.label || r.kind, r.radio.bands || '?', String(r.value), L.unit || '', LEVEL_TEXT[r.level]);
 	if (r.channel)
 		return _('%s channel %s: %s %s (%s).').format(r.channel.dir === 'ds' ? _('Downstream') : _('Upstream'),
 			r.channel.channel_id, L.label || r.kind, String(r.value), LEVEL_TEXT[r.level]);
@@ -474,7 +520,8 @@ var CSV_COLUMNS = {
 	readings: [ 'time', 'ts', 'result', 'reason', 'model', 'firmware', 'uptime_s', 'connectivity', 'boot', 'network_access', 'modem_time',
 		'ds_channels', 'us_channels', 'reboot', 'boot_ts', 'clock_offset_s', 'modem_ping_loss', 'modem_ping_ms', 'inet_ping_loss', 'inet_ping_ms' ],
 	channels: [ 'time', 'ts', 'dir', 'ch', 'channel_id', 'modulation', 'freq_hz', 'width_hz', 'lock', 'power_dbmv', 'snr_db', 'corrected', 'uncorrectable' ],
-	events: [ 'time', 'ts', 'modem_time', 'clock_offset_s', 'first_seen_ts', 'level', 'kind', 'message' ]
+	events: [ 'time', 'ts', 'modem_time', 'clock_offset_s', 'first_seen_ts', 'level', 'kind', 'message' ],
+	radios: [ 'time', 'ts', 'tech', 'bands', 'bars', 'rsrp_dbm', 'rsrq_db', 'rssi_dbm', 'sinr_db', 'cell' ]
 };
 
 /* The period's readings, channels (with the line-up joined in) or events
@@ -482,7 +529,7 @@ var CSV_COLUMNS = {
  * change since the previous good check. */
 function toCSV(D, kind) {
 	var cols = CSV_COLUMNS[kind];
-	var rows = kind === 'readings' ? D.readings : kind === 'channels' ? D.channels : D.events;
+	var rows = kind === 'readings' ? D.readings : kind === 'channels' ? D.channels : kind === 'radios' ? (D.radios || []) : D.events;
 	return [ cols.join(',') ].concat(rows.map(function(r) {
 		return cols.map(function(c) { return csvField(c === 'time' ? isoTime(+r.ts) : r[c]); }).join(',');
 	})).join('\r\n') + '\r\n';
@@ -642,7 +689,7 @@ function gatewayText(r) {
 }
 
 return baseclass.extend({
-	C: C, health: health, gatewayText: gatewayText,
+	C: C, health: health, gatewayText: gatewayText, isGateway: isGateway, verdictOf: verdictOf,
 	callStatus: callStatus, callData: callData, callCheck: callCheck, callTest: callTest, callSetPassword: callSetPassword,
 	callExport: callExport, callClear: callClear,
 	parseCSV: parseCSV, load: load, loadDigest: loadDigest, analyse: analyse, toCSV: toCSV, csvField: csvField, esc: esc,
