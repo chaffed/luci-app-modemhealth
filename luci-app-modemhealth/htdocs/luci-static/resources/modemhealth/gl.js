@@ -161,7 +161,7 @@
 	/* The views call the rpcd object luci.modemhealth; the panel's module
 	 * has the same methods, two under names the panel does not log. */
 	var METHODS = { status: 'get_status', data: 'get_data' };
-	var SECONDS = { check: 150, test: 150, data: 90, 'export': 320, clear: 150 };
+	var SECONDS = { check: 150, test: 150, data: 90, 'export': 320, clear: 150, restart: 150 };
 
 	var rpc = {
 		declare: function(o) {

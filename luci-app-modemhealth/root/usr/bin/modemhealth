@@ -801,6 +801,19 @@ export_append() { # $1=kind $2=header
 	rows_between "$1" $(( last + 1 )) 9999999999 >> "$dest" || return 1
 }
 
+# The restarts, as export_append does for the daily files: the rows the
+# drive does not have yet, at the end.
+export_restarts() {
+	local dest="$EXPORT_DIR/modemhealth-restarts.csv" last=0
+	[ -s "$DATA_DIR/restarts.csv" ] || [ -e "$dest" ] || return 0
+	if [ -s "$dest" ]; then
+		last=$(int_or "$(tail -n 1 "$dest" | cut -d, -f1)" 0)
+	else
+		echo "$RESTARTS_HEADER" > "$dest" || return 1
+	fi
+	restarts_between $(( last + 1 )) 9999999999 >> "$dest" || return 1
+}
+
 # Replace a file on the drive when what it should hold has changed. The new
 # content is written next to it and renamed once complete, so a half-written
 # file never replaces a good one.
@@ -871,6 +884,9 @@ report_html() {
 		} | sed 's/&/\&amp;/g; s/</\&lt;/g'
 		printf '</pre>\n'
 	done
+	printf '<pre hidden id="mh-restarts">\n'
+	{ echo "$RESTARTS_HEADER"; restarts_between "$since" 9999999999; } | sed 's/&/\&amp;/g; s/</\&lt;/g'
+	printf '</pre>\n'
 	printf '<pre hidden id="mh-channelmap">\n'
 	lineup_between "$since" 9999999999 | sed 's/&/\&amp;/g; s/</\&lt;/g'
 	printf '</pre>\n'
@@ -926,7 +942,7 @@ export_files() { # $1=1: write the report file whatever its age
 	fi
 	ensure_store 2>/dev/null
 	if ! { export_append readings "$READINGS_HEADER" && export_append channels "$CHANNELS_HEADER" &&
-		export_append events "$EVENTS_HEADER" && export_append radios "$RADIOS_HEADER" && export_replace modemhealth-lineup.csv < "$DATA_DIR/channelmap.csv" &&
+		export_append events "$EVENTS_HEADER" && export_append radios "$RADIOS_HEADER" && export_restarts && export_replace modemhealth-lineup.csv < "$DATA_DIR/channelmap.csv" &&
 		outages_csv "$dir/modemhealth-readings.csv" | export_replace modemhealth-outages.csv; } 2>/dev/null; then
 		export_fail error "the drive cannot be written to (full or read-only?)"
 		return 1
@@ -994,7 +1010,7 @@ archive_export() {
 	[ -n "$dir" ] || return 0
 	on_drive "$dir" || return 0
 	stamp=$(date +%Y%m%d-%H%M%S)
-	for f in "$dir"/modemhealth-readings.csv "$dir"/modemhealth-channels.csv "$dir"/modemhealth-events.csv "$dir"/modemhealth-radios.csv \
+	for f in "$dir"/modemhealth-readings.csv "$dir"/modemhealth-channels.csv "$dir"/modemhealth-events.csv "$dir"/modemhealth-radios.csv "$dir"/modemhealth-restarts.csv \
 		"$dir"/modemhealth-lineup.csv "$dir"/modemhealth-outages.csv "$dir"/modemhealth-report.html; do
 		[ -e "$f" ] || continue
 		base=${f##*/}
@@ -1560,6 +1576,12 @@ do_daemon() {
 # Rows of one kind of daily file (readings, channels, events) with
 # SINCE <= first column <= UNTIL, without headers. Only the days that can
 # hold such rows are opened.
+# The restarts Modem Health made or tried between SINCE and UNTIL.
+restarts_between() { # $1=since $2=until
+	[ -s "$DATA_DIR/restarts.csv" ] || return 0
+	tail -n +2 "$DATA_DIR/restarts.csv" | awk -F, -v s="$1" -v u="$2" '$1 + 0 >= s && $1 + 0 <= u'
+}
+
 rows_between() { # $1=kind $2=since $3=until
 	local f day from to
 	from=$(date -d "@$(( $2 - 86400 ))" +%Y%m%d 2>/dev/null || echo 0)
@@ -1652,6 +1674,8 @@ do_data() {
 			rows_between "$k" "$since" "$until"
 		} | json_text
 	done
+	printf ',"restarts":'
+	{ echo "$RESTARTS_HEADER"; restarts_between "$since" "$until"; } | json_text
 	# The line-up as it was at SINCE (the last entry of each channel before
 	# it) and every change up to UNTIL. On a line whose channels keep
 	# losing lock the whole history would outgrow a reply.

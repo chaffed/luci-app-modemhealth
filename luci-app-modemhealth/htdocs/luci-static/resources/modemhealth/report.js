@@ -200,7 +200,13 @@ function build(G, o) {
 	var first = R.length ? +R[0].ts : null, last = R.length ? +R[R.length - 1].ts : null;
 	var covered = first != null ? last - first : 0;
 	var P = G.period || { level: 'unknown', reasons: [], counts: { events: {} }, hours: 0 }, counts = P.counts, ev = counts.events || {};
-	var outages = G.outages || [], reboots = G.reboots || [], regs = G.reregistrations || [];
+	/* Restarts Modem Health made, and the modem restarts and outages they
+	 * caused (health.ownRestarts): listed, never held against the line. */
+	var allOutages = G.outages || [], allReboots = G.reboots || [], regs = G.reregistrations || [];
+	var outages = allOutages.filter(function(x) { return !x.byModemHealth; }), reboots = allReboots.filter(function(r) { return !r.byModemHealth; });
+	var ownOutages = allOutages.filter(function(x) { return x.byModemHealth; }), ownReboots = allReboots.filter(function(r) { return r.byModemHealth; });
+	var made = (G.restarts || []).filter(function(x) { return x.result === 'ok'; }), tried = (G.restarts || []).filter(function(x) { return x.result !== 'ok'; });
+	var autoMade = made.filter(function(x) { return x.trigger !== 'manual'; });
 	var hours = P.hours || 0, days = hours / 24;
 	var preliminary = R.length > 0 && covered < PRELIMINARY_S;
 	var interval = o.interval || G.interval || 5;
@@ -232,7 +238,12 @@ function build(G, o) {
 		say('marginal', _('The modem had to register with the ISP\'s network again %s without being restarted.').format(n(regs.length, _('time'), _('times'))));
 	if (reboots.length)
 		say((P.reasons.filter(function(r) { return r.kind === 'reboot'; })[0] || {}).level || 'marginal',
-			_('The %s restarted %s.').format(dev, n(reboots.length, _('time'), _('times'))));
+			(made.length ? _('The %s restarted %s on its own.') : _('The %s restarted %s.')).format(dev, n(reboots.length, _('time'), _('times'))));
+	if (made.length || tried.length)
+		say('info', _('Modem Health restarted the %s %s (%s automatically, %s by hand)%s. %s and %s that followed them are listed in section 3 but not held against the line. Restarts can hide a fault for a while; they do not fix it.')
+			.format(dev, n(made.length, _('time'), _('times')), autoMade.length, made.length - autoMade.length,
+				tried.length ? _('; %s could not be made').format(n(tried.length, _('more attempt'), _('more attempts'))) : '',
+				n(ownReboots.length, _('%s restart').format(dev), _('%s restarts').format(dev)), n(ownOutages.length, _('outage'), _('outages'))));
 	if (failing)
 		say('bad', (gw ? _('%s of the %s that read the gateway (%s) found the signal below the acceptable range, or no radio connected.')
 			: _('%s of the %s that read the modem (%s) found at least one value out of spec.'))
@@ -344,11 +355,19 @@ function build(G, o) {
 		_('Losses of sync'), _('T3'), _('T4'), _('Other time-outs'), _('Re-registrations'), _('Restarts'), _('Uncorrectable') ],
 		dayList.map(function(d) { return dayRow(d, d.day); }).concat(dayList.length > 1 ? [ { cls: 'total', cells: dayRow(totals, _('Total')) } ] : []), 'days');
 
-	var outageTable = outages.length ? table([ _('First check that found it down'), _('What did not answer'), _('Lasted at least'), _('Lasted at most'), _('Checks that found it down') ],
-		outages.map(function(x) {
-			return [ mh.fmtTime(x.start), x.kind === 'line_down' ? _('The internet; the %s still answered').format(dev) : _('The internet and the %s').format(dev),
+	var outageTable = allOutages.length ? table([ _('First check that found it down'), _('What did not answer'), _('Lasted at least'), _('Lasted at most'), _('Checks that found it down') ],
+		allOutages.map(function(x) {
+			return [ mh.fmtTime(x.start) + (x.byModemHealth ? _(' (after a restart by Modem Health; not counted)') : ''),
+				x.kind === 'line_down' ? _('The internet; the %s still answered').format(dev) : _('The internet and the %s').format(dev),
 				mh.fmtDuration(x.minS), x.ongoing ? _('still down at the last check') : (x.maxS != null ? mh.fmtDuration(x.maxS) : _('unknown')), x.checks ];
 		})) : '<p>' + esc(_('No outage: at every check that could ping, the internet host answered.')) + '</p>';
+
+	var TRIGGER = { manual: _('by hand'), down: _('automatically: no connection'), signal: _('automatically: bad signal') };
+	var restartsHtml = (G.restarts || []).length ? '<h3>' + esc(_('Restarts by Modem Health')) + '</h3>' +
+		table([ _('Time'), _('Why'), _('Result') ], G.restarts.map(function(x) {
+			return [ mh.fmtTime(x.ts), (TRIGGER[x.trigger] || x.trigger) + (x.detail ? ' – ' + x.detail : ''),
+				x.result === 'ok' ? _('restarted') : _('not restarted (%s)').format(x.fail_reason || '?') ];
+		})) + '<p class="note">' + esc(_('Restarts Modem Health made are told apart from those the %s made on its own: a %s restart that began within 5 minutes of one, and an outage that began within 15 minutes after one, are listed but not held against the line. An outage already going on at the restart is the line\'s and is counted.').format(dev, dev)) + '</p>' : '';
 
 	var what = { reg: _('Re-registration'), restart: _('%s restart').format(DEV), outage: _('Outage found') };
 	var timesHtml = '';
@@ -442,9 +461,9 @@ function build(G, o) {
 	var marks = Object.keys(marked).map(function(k) {
 		return { ts: from + (+k + 0.5) * slotW, color: mh.C.bad, label: _('%s around %s').format(n(marked[k], _('event'), _('events')), mh.fmtTime(from + (+k + 0.5) * slotW)) };
 	});
-	reboots.forEach(function(r) { marks.push({ ts: +r.boot_ts || +r.ts, color: '#8e44ad', label: _('%s restarted').format(DEV) }); });
+	allReboots.forEach(function(r) { marks.push({ ts: +r.boot_ts || +r.ts, color: '#8e44ad', label: r.byModemHealth ? _('%s restarted by Modem Health').format(DEV) : _('%s restarted').format(DEV) }); });
 	var common = { from: from, to: to, marks: marks,
-		spans: outages.map(function(x) { return { from: x.start - 60, to: (x.end || x.start) + 60, color: mh.C.bad, label: _('Outage, %s').format(mh.fmtTime(x.start)) }; }) };
+		spans: allOutages.map(function(x) { return { from: x.start - 60, to: (x.end || x.start) + 60, color: mh.C.bad, label: _('Outage, %s').format(mh.fmtTime(x.start)) }; }) };
 	var fig = function(title, note, opt, leg) {
 		opt.title = title;
 		Object.keys(common).forEach(function(k) { if (opt[k] == null) opt[k] = common[k]; });
@@ -657,7 +676,7 @@ function build(G, o) {
 		'<h2>' + esc(_('1. Findings')) + '</h2>' + summary +
 		'<h2>' + esc(gw ? _('2. Gateway and line') : _('2. Modem and line')) + '</h2>' + line +
 		'<h2>' + esc(_('3. Outages and events')) + '</h2>' +
-		'<h3>' + esc(_('Outages')) + '</h3>' + outageTable +
+		'<h3>' + esc(_('Outages')) + '</h3>' + outageTable + restartsHtml +
 		'<h3>' + esc(_('Day by day')) + '</h3>' + (dayList.length ? dayTable : '<p>' + esc(_('No checks in this period.')) + '</p>') +
 		'<p class="note">' + esc(gw ? _('Tower changes and lost 4G/5G connections are found by comparing each check with the one before; restarts are seen from the gateway\'s uptime; outages from the pings.')
 			: _('Losses of sync, time-outs (other: T2, T6 and lost MDD) and re-registrations are from the modem\'s own log; restarts are seen from the modem\'s uptime; outages from the pings.')) + '</p>' +

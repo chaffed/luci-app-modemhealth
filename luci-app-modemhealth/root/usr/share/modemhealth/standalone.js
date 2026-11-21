@@ -70,6 +70,8 @@
 		data = { readings: stored('mh-readings'), channels: stored('mh-channels'), events: stored('mh-events'), channelmap: $('mh-channelmap').textContent,
 			/* A gateway's radios (files made before 1.1 have none). */
 			radios: $('mh-radios') ? stored('mh-radios') : null,
+			/* Restarts Modem Health made (files made before 1.2 have none). */
+			restarts: $('mh-restarts') ? stored('mh-restarts') : null,
 			/* ISPy's speed tests, when the router had any. */
 			speed: $('mh-speedtests') ? stored('mh-speedtests') : null };
 		var rpc = { declare: function(o) {
@@ -78,7 +80,8 @@
 					return Promise.reject(new Error('not connected to the router'));
 				var d = { readings: between(data.readings, since, until), channels: between(data.channels, since, until),
 					events: between(data.events, since, until), channelmap: data.channelmap,
-					radios: data.radios ? between(data.radios, since, until) : '' };
+					radios: data.radios ? between(data.radios, since, until) : '',
+					restarts: data.restarts ? between(data.restarts, since, until) : '' };
 				if (data.speed)
 					d.speed = { plan_down: (ctx.speed || {}).plan_down, plan_up: (ctx.speed || {}).plan_up,
 						tests: data.speed.head + '\n' + data.speed.rows.filter(function(l, i) { return data.speed.ts[i] >= since && data.speed.ts[i] <= until; }).join('\n') + '\n' };

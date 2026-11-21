@@ -19,7 +19,8 @@
 					"test",
 					"set_password",
 					"export",
-					"clear"
+					"clear",
+					"restart"
 				]
 			},
 			"uci": [

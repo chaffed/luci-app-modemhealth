@@ -273,6 +273,26 @@ ok([ 'slow', 'fine', 'failed', 'unjudged' ].every(function(g) {
 eq([ H.speedTests([], PLAN, lineOf).n, H.speedTests(null, PLAN, { windowS: W }).n, H.speedTests([ okT(1, 1, 1) ], PLAN, {}).tests[0].line ], [ 0, 0, 'unknown' ],
 	'speed: no tests, or no history at all, is not an error');
 
+/* ------------------------------------------------------ own restarts -- */
+(function() {
+	eq([ H.classifyEvent('Restarted by Modem Health: asked for by hand'), H.classifyEvent('Modem Health could not restart the modem (unreachable): x') ],
+		[ 'mh_restart', 'mh_restart' ], 'own restarts: Modem Health\'s events have their own kind');
+	ok(!H.DISRUPTIVE.mh_restart, 'own restarts: not counted as a disruption of the line');
+	var T = 100000;
+	var readings = [
+		{ ts: T - 300, reboot: '0' },
+		{ ts: T + 300, reboot: '1', boot_ts: String(T + 20) },       /* booted 20 s after the restart */
+		{ ts: T + 20000, reboot: '1', boot_ts: String(T + 19800) }  /* a restart of its own, later */
+	];
+	var outs = [ { start: T - 900, end: T - 300 }, { start: T + 300, end: T + 300 }, { start: T + 5000, end: T + 5300 } ];
+	var n = H.ownRestarts(readings, [ { ts: String(T), trigger: 'down', result: 'ok' }, { ts: String(T + 19700), trigger: 'manual', result: 'failed' } ], outs, 900);
+	eq(n, { reboots: 1, outages: 1 }, 'own restarts: the modem restart and the outage right after a restart are Modem Health\'s');
+	eq([ !!readings[1].byModemHealth, !!readings[2].byModemHealth ], [ true, false ], 'own restarts: a restart after a failed attempt is the modem\'s own');
+	eq(outs.map(function(o) { return !!o.byModemHealth; }), [ false, true, false ], 'own restarts: an outage going on before the restart, or long after, is the line\'s');
+	var P = H.periodVerdict({ hours: 24, readings: [], events: [], reboots: 0, outages: [] });
+	eq(P.counts.outages, 0, 'own restarts: what is left out is not counted');
+})();
+
 /* ------------------------------------------------ automatic restarts -- */
 /* The backend judges "outside the acceptable range" itself (signal_signs,
  * for automatic restarts). Its table of bounds must be health.js's, and

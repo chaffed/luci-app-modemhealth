@@ -115,6 +115,14 @@ M.clear = function()
     return run_json({ "clear" }, 120)
 end
 
+--[[
+    @method-name: restart
+    @method-desc: Restart the modem now (as its own Restart button does), and record it. Logged by the panel.
+--]]
+M.restart = function()
+    return run_json({ "restart", "manual" }, 150)
+end
+
 -- ------------------------------------------------------------- settings --
 
 local function is_uint(v) return v:match("^%d+$") ~= nil and #v <= 10 end

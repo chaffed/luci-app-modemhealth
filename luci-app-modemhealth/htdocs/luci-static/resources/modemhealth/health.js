@@ -452,6 +452,8 @@ function gatewayVerdict(reading, radios, limits) {
 
 /* What a modem event log message means. Order matters: first match wins. */
 var EVENT_KINDS = [
+	/* Written by Modem Health when it restarts the modem (#39). */
+	{ kind: 'mh_restart', re: /^(Restarted by Modem Health|Modem Health could not restart)/ },
 	{ kind: 'login', re: /WebGUI login/i },
 	{ kind: 't4', re: /T4 time[- ]?out/i },
 	{ kind: 't3', re: /T3 time[- ]?out/i },
@@ -516,6 +518,32 @@ function reregistrations(events) {
 		}
 	});
 	return out.map(function(r) { return { time: r.time, events: r.events }; });
+}
+
+/* ---------------------------------------------------- own restarts -- */
+
+/* ownRestarts(readings, restarts, outages, windowS)
+ * restarts: rows of restarts.csv (ts, trigger, result, ...): the restarts
+ * Modem Health made or tried. A modem restart that began within 5 minutes
+ * of one it made, and an outage that began within windowS (default 15
+ * minutes) after one, were caused by Modem Health, not the line: they are
+ * marked .byModemHealth (and left out of the period's verdict by the
+ * caller). An outage already going on at the restart is the line's.
+ * -> { reboots, outages }: how many were marked */
+function ownRestarts(readings, restarts, outages, windowS) {
+	var made = (restarts || []).filter(function(r) { return r.result === 'ok'; }).map(function(r) { return num(r.ts); })
+		.filter(function(t) { return t != null; });
+	var near = function(t, lo, hi) { return made.some(function(x) { return t >= x + lo && t <= x + hi; }); };
+	var n = { reboots: 0, outages: 0 };
+	(readings || []).forEach(function(r) {
+		if (r.reboot !== '1') return;
+		var b = num(r.boot_ts);
+		if (near(b == null ? +r.ts : b, -60, 300)) { r.byModemHealth = true; n.reboots++; }
+	});
+	(outages || []).forEach(function(o) {
+		if (near(o.start, 1, windowS || 900)) { o.byModemHealth = true; n.outages++; }
+	});
+	return n;
 }
 
 /* ------------------------------------------------------------- outages -- */
@@ -732,6 +760,6 @@ return baseclass.extend({
 	limitList: limitList, limitFields: limitFields, applySettings: applySettings,
 	channelVerdict: channelVerdict, readingVerdict: readingVerdict, radioVerdict: radioVerdict,
 	classifyEvent: classifyEvent, parseModemLog: parseModemLog,
-	modemSeconds: modemSeconds, reregistrations: reregistrations, outages: outages,
+	modemSeconds: modemSeconds, reregistrations: reregistrations, outages: outages, ownRestarts: ownRestarts,
 	periodVerdict: periodVerdict
 });

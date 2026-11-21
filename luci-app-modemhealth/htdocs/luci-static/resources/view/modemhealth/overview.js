@@ -143,7 +143,9 @@ function charts(D) {
 	var marks = D.events.filter(function(e) { return H.DISRUPTIVE[e.kind]; }).map(function(e) {
 		return { ts: e.ts, color: mh.C.bad, label: '%s · %s'.format(mh.fmtTime(e.ts), e.message) };
 	});
-	D.reboots.forEach(function(r) { marks.push({ ts: +r.boot_ts || +r.ts, color: '#8e44ad', label: D.gateway ? _('Gateway restarted') : _('Modem restarted') }); });
+	D.reboots.forEach(function(r) {
+		marks.push({ ts: +r.boot_ts || +r.ts, color: '#8e44ad', label: (D.gateway ? _('Gateway restarted') : _('Modem restarted')) + (r.byModemHealth ? _(' by Modem Health') : '') });
+	});
 	var scqam = function(c) { return /OFDM/.test(c.modulation || '') ? null : H.num(c.power_dbmv); };
 	var snr = function(c) { return /OFDM/.test(c.modulation || '') ? null : H.num(c.snr_db); };
 	var mer = function(c) { return /OFDM/.test(c.modulation || '') ? H.num(c.snr_db) : null; };
@@ -223,7 +225,7 @@ function eventsTable(D) {
 	var KIND = {
 		t4: _('T4 time-out'), t3: _('T3 time-out'), t2: _('T2 time-out'), t6: _('T6 time-out'), sync_loss: _('Loss of sync'),
 		mdd_loss: _('Lost MDD'), registration: _('Registration'), ranging: _('Ranging'), reboot: _('Restart'), config: _('Configuration'),
-		cell_change: _('Tower change'), band_change: _('Band change'), radio_lost: _('Radio lost'), other: ''
+		cell_change: _('Tower change'), band_change: _('Band change'), radio_lost: _('Radio lost'), mh_restart: _('Restart by Modem Health'), other: ''
 	};
 	return E('div', { 'class': 'mh-tablewrap' }, E('table', { 'class': 'table mh-events' }, [
 		E('tr', { 'class': 'tr table-titles' }, [ _('Time'), _('Level'), _('What'), _('Message') ].map(function(h) { return E('th', { 'class': 'th' }, [ h ]); }))
@@ -285,6 +287,62 @@ function explanations(gateway) {
 	return E('details', { 'class': 'cbi-section' }, [
 		E('summary', {}, [ _('What do these mean?') ]),
 		E('dl', { 'class': 'mh-explain' }, [].concat.apply([], items.map(function(i) { return [ E('dt', {}, [ i[0] ]), E('dd', {}, [ i[1] ]) ]; })))
+	]);
+}
+
+/* Restarts (#39): the automatic setting, the last restart, and the
+ * Restart button (SURFboards only for now: a gateway restart needs its
+ * admin password and is untested). */
+var TRIGGER = { manual: _('by hand'), down: _('no connection'), signal: _('bad signal') };
+var RESTART_FAILED = {
+	unreachable: _('the modem did not answer.'),
+	timeout: _('the modem did not answer in time.'),
+	login_refused: _('the modem refused the saved password.'),
+	no_password: _('no modem password is saved.'),
+	restart_unknown_settings: _('the modem\'s settings page answered in a way Modem Health does not know, so nothing was sent.')
+};
+function reasonText(r) { return RESTART_FAILED[r] || _('the modem answered "%s".').format(r || '?'); }
+function restartBox(st, gw, redraw) {
+	var R = st.restart || {}, last = R.last;
+	var out = [ E('p', { 'class': 'mh-note', 'id': 'mh-restart-state' }, [
+		R.auto ? _('Automatic restarts: on, after %d minutes without a connection%s; at most %d an hour and %d a day.')
+				.format(R.down_min || 10, R.signal ? _(' or after bad signal') : '', R.max_hour, R.max_day)
+			: _('Automatic restarts: off.'),
+		last ? E('br') : '',
+		last ? (last.result === 'ok' ? _('Last restart by Modem Health: %s (%s).') : _('Last restart by Modem Health failed: %s (%s).'))
+			.format(mh.fmtTime(last.ts), last.result === 'ok' ? (TRIGGER[last.trigger] || last.trigger) : (last.reason || '?')) : ''
+	]) ];
+	if (gw || !st.password_set) return E('div', {}, out);
+	out.push(E('button', { 'class': 'cbi-button cbi-button-negative', 'id': 'mh-restart', 'click': function() {
+		ui.showModal(_('Restart the modem?'), [
+			E('p', {}, [ _('The internet connection will be down for a few minutes while the modem restarts, as with the Restart button on the modem\'s own page. The restart is recorded, and the report will not hold it against the line.') ]),
+			E('div', { 'class': 'right' }, [
+				E('button', { 'class': 'cbi-button', 'click': ui.hideModal }, [ _('Cancel') ]), ' ',
+				E('button', { 'class': 'cbi-button cbi-button-negative', 'click': function() {
+					return mh.callRestart().then(function(r) {
+						ui.hideModal();
+						ui.addNotification(null, E('p', {}, [ r && r.ok
+							? _('The modem is restarting. It is usually back within five minutes.')
+							: _('The modem was not restarted: %s').format(reasonText((r || {}).reason)) ]), r && r.ok ? 'info' : 'warning');
+						return mh.callStatus().then(redraw);
+					}).catch(function(e) {
+						ui.hideModal();
+						ui.addNotification(null, E('p', {}, [ _('The modem was not restarted: %s').format(String(e.message || e)) ]), 'warning');
+					});
+				} }, [ _('Restart the modem') ])
+			])
+		]);
+	} }, [ _('Restart modem…') ]));
+	return E('div', {}, out);
+}
+
+/* An automatic restart held back by a limit: the line needs the provider. */
+function heldBox(st) {
+	var h = (st.restart || {}).held;
+	if (!h) return '';
+	return E('div', { 'class': 'alert-message warning', 'id': 'mh-restart-held' }, [
+		_('Modem Health would restart the modem (%s), but automatic restarts are limited to %s and that limit is reached. If restarts keep being needed, the provider has to look at the line.')
+			.format(h.detail, h.limit)
 	]);
 }
 
@@ -354,9 +412,11 @@ return view.extend({
 				E('div', {}, [
 					E('h3', {}, [ gw ? _('Gateway') : _('Modem') ]),
 					E('p', {}, [ [ modem.model, gw ? _('T-Mobile 5G gateway') : modem.docsis ].filter(Boolean).join(' · ') || _('Not read yet.') ]),
-					E('p', { 'class': 'mh-note' }, [ modem.firmware ? _('Firmware %s').format(modem.firmware) : '', E('br'), modem.mac ? _('MAC %s').format(modem.mac) : '' ])
+					E('p', { 'class': 'mh-note' }, [ modem.firmware ? _('Firmware %s').format(modem.firmware) : '', E('br'), modem.mac ? _('MAC %s').format(modem.mac) : '' ]),
+					restartBox(st, gw, redraw)
 				])
-			])
+			]),
+			heldBox(st)
 		]);
 	},
 
@@ -373,9 +433,16 @@ return view.extend({
 					PERIODS.map(function(p) { return E('option', { 'value': p[0], 'selected': p[0] === self.days ? '' : null }, [ p[1] ]); }));
 				var outageItems = D.outages.map(function(o) {
 					return _('%s: %s, at least %s%s.').format(mh.fmtTime(o.start), o.kind === 'line_down' ? _('line down') : unreachable,
-						mh.fmtDuration(o.minS), o.ongoing ? _(', still down') : (o.maxS != null ? _(', at most %s').format(mh.fmtDuration(o.maxS)) : ''));
+						mh.fmtDuration(o.minS), o.ongoing ? _(', still down') : (o.maxS != null ? _(', at most %s').format(mh.fmtDuration(o.maxS)) : ''))
+						+ (o.byModemHealth ? ' ' + _('After a restart by Modem Health; not held against the line.') : '');
 				});
-				var restartItems = D.reboots.map(function(r) { return (D.gateway ? _('Gateway restarted at %s.') : _('Modem restarted at %s.')).format(mh.fmtTime(+r.boot_ts || +r.ts)); })
+				var restartItems = D.reboots.map(function(r) {
+					return (D.gateway ? _('Gateway restarted at %s.') : _('Modem restarted at %s.')).format(mh.fmtTime(+r.boot_ts || +r.ts))
+						+ (r.byModemHealth ? ' ' + _('Restarted by Modem Health.') : '');
+				})
+					.concat(D.restarts.filter(function(x) { return x.result !== 'ok'; }).map(function(x) {
+						return _('%s: Modem Health could not restart the modem (%s).').format(mh.fmtTime(x.ts), x.fail_reason || '?');
+					}))
 					.concat(D.reregistrations.map(function(r) { return _('Re-registered (modem time %s).').format(r.time); }));
 				var body = [
 					E('style', {}, [ CSS ]),
