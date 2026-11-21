@@ -25,6 +25,15 @@ Control endpoints (plain GET on the same port) for tests:
                                 restart=1       the modem restarted: counters start
                                                 again from counter_add, uptime from
                                                 the uptime setting (default 60)
+                                eee=N, led=N    the Energy Efficient Ethernet and LED
+                                                settings (GetArrisConfigurationInfo)
+                                reboot_reply=X  answer a reboot with result X
+                                                (default OK)
+    SetArrisConfigurationInfo with Action "reboot" restarts it (as restart=1,
+    and every session is forgotten), when the EEE and LED settings sent with
+    it are the current ones; it counts as "settings_changed" otherwise. Any
+    other Action (such as "restore", a factory reset) is refused and counted
+    as "forbidden_actions".
     /_control/reset             counters back to zero, defaults restored
 
 Usage: python3 tests/fake_modem.py --port 18443 --password 'secret'
@@ -89,9 +98,17 @@ class Modem:
         self.new_events = 0
         self.unlocked = set()
         self.retuned = {}
+        self.eee, self.led = "0", "1"
+        self.reboot_reply = "OK"
         self.counts = {"requests": 0, "logins": 0, "login_failures": 0,
                        "bad_signatures": 0, "status_reads": 0, "logouts": 0,
-                       "unauthorised": 0, "stale_timestamps": 0}
+                       "unauthorised": 0, "stale_timestamps": 0,
+                       "reboots": 0, "forbidden_actions": 0, "settings_changed": 0}
+
+    def restart(self):
+        self.counter_base = False
+        if self.uptime is None:
+            self.uptime = 60
 
     def reply_for(self, action):
         """The captured reply, changed by the counter and uptime controls."""
@@ -115,6 +132,8 @@ class Modem:
             added = ["0^11/19/2026 15:%02d:%02d^^Critical^SYNC Timing Synchronization failure - Loss of Sync" % (i // 60, i % 60)
                      for i in range(self.new_events, 0, -1)]
             reply["CustomerStatusLogList"] = "}-{".join((added + entries)[:100])
+        if action == "GetArrisConfigurationInfo" and "ethSWEthEEE" in reply:
+            reply["ethSWEthEEE"], reply["LedStatus"] = self.eee, self.led
         if action == "GetCustomerStatusSoftware" and self.uptime is not None:
             u = self.uptime
             reply["CustomerConnSystemUpTime"] = "%d day(s) %02dh:%02dm:%02ds" % (u // 86400, u % 86400 // 3600, u % 3600 // 60, u % 60)
@@ -180,9 +199,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     elif key == "new_events":
                         m.new_events += int(value)
                     elif key == "restart":
-                        m.counter_base = False
-                        if m.uptime is None:
-                            m.uptime = 60
+                        m.restart()
+                    elif key == "eee":
+                        m.eee = value
+                    elif key == "led":
+                        m.led = value
+                    elif key == "reboot_reply":
+                        m.reboot_reply = value
                 return self.reply(200, m.state())
         # The real modem sends every other page to the login page.
         self.send_response(302)
@@ -268,7 +291,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     return self.reply(200, replies)
                 replies["GetMultipleHNAPsResult"] = "OK"
                 return self.reply(200, {"GetMultipleHNAPsResponse": replies})
+            if action == "SetArrisConfigurationInfo":
+                return self.set_configuration(m, body.get("SetArrisConfigurationInfo", {}))
             return self.reply(200, {action + "Response": {action + "Result": "ERROR"}})
+
+    def set_configuration(self, m, req):
+        if req.get("Action") != "reboot":
+            m.counts["forbidden_actions"] += 1
+            return self.reply(200, {"SetArrisConfigurationInfoResponse": {
+                "SetArrisConfigurationInfoResult": "ERROR", "SetArrisConfigurationInfoAction": ""}})
+        if req.get("SetEEEEnable") != m.eee or req.get("LED_Status") != m.led:
+            m.counts["settings_changed"] += 1
+        if m.reboot_reply != "OK":
+            return self.reply(200, {"SetArrisConfigurationInfoResponse": {
+                "SetArrisConfigurationInfoResult": m.reboot_reply, "SetArrisConfigurationInfoAction": ""}})
+        m.counts["reboots"] += 1
+        m.sessions.clear()
+        m.restart()
+        return self.reply(200, {"SetArrisConfigurationInfoResponse": {
+            "SetArrisConfigurationInfoResult": "OK", "SetArrisConfigurationInfoAction": "REBOOT"}})
 
     def login(self, m, req, cookies):
         if req.get("Action") == "request":

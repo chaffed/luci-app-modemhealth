@@ -14,6 +14,9 @@
 #   modemhealth test         try logging in with MH_HOST, MH_USER and
 #                            MH_PASSWORD (environment; empty = saved), as JSON
 #   modemhealth set-password read a new modem password from stdin and save it
+#   modemhealth restart [TRIGGER [DETAIL]]
+#                            restart the modem (TRIGGER: manual, down or
+#                            signal) and record it, as JSON
 #
 # The password is kept in /etc/config/modemhealth_auth (root only), apart
 # from the other settings, so that the web pages, which load the whole
@@ -44,6 +47,8 @@ CHANNELS_HEADER='ts,dir,channel_id,lock,power_dbmv,snr_db,corrected,uncorrectabl
 CHANNELMAP_HEADER='ts,dir,ch,channel_id,modulation,freq_hz,width_hz'
 # A gateway's radios, one row per radio per good check (tech: lte or nr).
 RADIOS_HEADER='ts,tech,bands,bars,rsrp_dbm,rsrq_db,rssi_dbm,sinr_db,cell'
+# Every restart Modem Health made or tried (see "restart").
+RESTARTS_HEADER='ts,trigger,result,detail,fail_reason'
 
 log() { logger -t modemhealth "$*" 2>/dev/null; [ -t 2 ] && echo "modemhealth: $*" >&2; return 0; }
 
@@ -201,13 +206,13 @@ session_drop() {
 	PRIVATE_KEY=; SESSION_UID=
 }
 
-# Reads the status with the kept session, logging in (again) only when
-# there is none or the modem no longer accepts it.
-modem_read_with_session() {
+# Runs FUNCTION with the kept session, logging in (again) only when there
+# is none or the modem no longer accepts it.
+modem_with_session() { # $1=function
 	if session_load; then
-		modem_read_status && return 0
+		"$1" && return 0
 		case $FAIL_REASON in
-			unreachable|timeout|tls_error|no_openssl|curl_error_*) return 1 ;;
+			unreachable|timeout|tls_error|no_openssl|curl_error_*|restart_*) return 1 ;;
 		esac
 		log "modem session no longer accepted ($FAIL_REASON); logging in again"
 		session_drop
@@ -216,7 +221,42 @@ modem_read_with_session() {
 	modem_login || return 1
 	session_save
 	log "new modem session"
-	modem_read_status
+	"$1"
+}
+
+modem_read_with_session() { modem_with_session modem_read_status; }
+
+# Restarts a SURFboard, as the Restart button on its Configuration page
+# does (the modem's configuration.js): read the current settings, then
+# send SetArrisConfigurationInfo with Action "reboot" and the Energy
+# Efficient Ethernet and LED settings just read, which the modem's page
+# always sends back with it (other values would change them). The same
+# call with Action "restore" is a factory reset: the action here is fixed.
+# Sets FAIL_REASON on failure; restart_* reasons mean the reboot itself was
+# refused (not worth a new login).
+modem_restart() {
+	local out="$RUN_DIR/restart.json" rc result eee led action
+	hnap GetMultipleHNAPs '{"GetMultipleHNAPs":{"GetArrisConfigurationInfo":"","GetCustomerStatusSoftware":""}}' "$out"
+	rc=$?; [ $rc -eq 0 ] || { curl_failed $rc; rm -f "$out"; return 1; }
+	[ "$HTTP_CODE" = 200 ] || { FAIL_REASON="http_$HTTP_CODE"; rm -f "$out"; return 1; }
+	result=$(jsonfilter -i "$out" -e '@.GetMultipleHNAPsResponse.GetArrisConfigurationInfoResponse.GetArrisConfigurationInfoResult' 2>/dev/null)
+	eee=$(jsonfilter -i "$out" -e '@.GetMultipleHNAPsResponse.GetArrisConfigurationInfoResponse.ethSWEthEEE' 2>/dev/null)
+	led=$(jsonfilter -i "$out" -e '@.GetMultipleHNAPsResponse.GetArrisConfigurationInfoResponse.LedStatus' 2>/dev/null)
+	rm -f "$out"
+	[ "$result" = OK ] || { FAIL_REASON="status_$(clean "${result:-bad_reply}")"; return 1; }
+	# Settings the modem's page would send back unchanged; anything else
+	# is not a reply this was written for, and nothing is sent.
+	case $eee in [0-9]) ;; *) FAIL_REASON=restart_unknown_settings; return 1 ;; esac
+	case $led in [0-9]) ;; *) FAIL_REASON=restart_unknown_settings; return 1 ;; esac
+	hnap SetArrisConfigurationInfo "{\"SetArrisConfigurationInfo\":{\"Action\":\"reboot\",\"SetEEEEnable\":\"$eee\",\"LED_Status\":\"$led\"}}" "$out"
+	rc=$?; [ $rc -eq 0 ] || { curl_failed $rc; rm -f "$out"; return 1; }
+	[ "$HTTP_CODE" = 200 ] || { FAIL_REASON="http_$HTTP_CODE"; rm -f "$out"; return 1; }
+	result=$(jsonfilter -i "$out" -e '@.SetArrisConfigurationInfoResponse.SetArrisConfigurationInfoResult' 2>/dev/null)
+	action=$(jsonfilter -i "$out" -e '@.SetArrisConfigurationInfoResponse.SetArrisConfigurationInfoAction' 2>/dev/null)
+	rm -f "$out"
+	[ "$result" = OK ] && [ "$action" = REBOOT ] && return 0
+	FAIL_REASON="restart_$(clean "${result:-bad_reply}")"
+	return 1
 }
 
 # Reads all status pages in one request into $RUN_DIR/status.json.
@@ -353,6 +393,44 @@ gw_radio_rows() {
 	done
 }
 
+# Restarts a T-Mobile gateway: log in once (POST auth/login, the admin
+# password) and POST gateway/reset?set=reboot with the token, as the public
+# clients do (#39). Untested on a real gateway, so it runs only with the
+# hidden setting gw_restart=1 (for a beta tester). Repeated failed logins
+# lock the gateway's admin page, so a refused password is never tried
+# again until the password is changed in Settings. The password and token
+# go to curl on its input, never as arguments (which every process can
+# read). Sets FAIL_REASON on failure.
+gw_restart() {
+	local out="$RUN_DIR/gw-restart.json" refused="$DATA_DIR/gw_login_refused" base token rc
+	[ "$(uci -q get "$CONFIG.main.gw_restart")" = 1 ] || { FAIL_REASON=restart_not_enabled; return 1; }
+	[ -n "$PASSWORD" ] || { FAIL_REASON=no_password; return 1; }
+	if [ -e "$refused" ] && ! [ /etc/config/${CONFIG}_auth -nt "$refused" ]; then
+		FAIL_REASON=restart_password_refused_before; return 1
+	fi
+	[ -n "$GW_PORT" ] || gw_read || return 1
+	base="http://${HOST%%:*}:$GW_PORT/TMI/v1"
+	HTTP_CODE=$(printf '{"username":%s,"password":%s}' "$(json_str "$USERNAME")" "$(json_str "$PASSWORD")" |
+		curl -s --max-time "$TIMEOUT" -o "$out" -w '%{http_code}' -H 'Content-Type: application/json' \
+			--data-binary @- "$base/auth/login")
+	rc=$?; [ $rc -eq 0 ] || { curl_failed $rc; rm -f "$out"; return 1; }
+	case $HTTP_CODE in
+		200) ;;
+		401|403) : > "$refused"; FAIL_REASON=login_refused; rm -f "$out"; return 1 ;;
+		*) FAIL_REASON="http_$HTTP_CODE"; rm -f "$out"; return 1 ;;
+	esac
+	rm -f "$refused"
+	token=$(jsonfilter -i "$out" -e '@.auth.token' 2>/dev/null)
+	rm -f "$out"
+	case $token in ''|*[!A-Za-z0-9._-]*) FAIL_REASON=bad_reply; return 1 ;; esac
+	HTTP_CODE=$(printf 'header = "Authorization: Bearer %s"\n' "$token" |
+		curl -s --max-time "$TIMEOUT" -o /dev/null -w '%{http_code}' -K - -X POST "$base/gateway/reset?set=reboot")
+	rc=$?; [ $rc -eq 0 ] || { curl_failed $rc; return 1; }
+	case $HTTP_CODE in 2??) return 0 ;; esac
+	FAIL_REASON="restart_http_$HTTP_CODE"
+	return 1
+}
+
 # Which reader to use: sets DEVICE to surfboard or tmobile. "auto": a
 # SURFboard at its usual address; elsewhere the gateway API if it answers.
 detect_device() {
@@ -393,6 +471,9 @@ detect_device() {
 #                             only when one of these changes
 #   channelmap.last           the line-up at the previous good check
 #   modem.txt                 type, model, firmware, MAC: what the ISP needs
+#   restarts.csv              every restart Modem Health made or tried
+#   gw_login_refused          the gateway refused the password at a restart:
+#                             no restart logs in again until it is changed
 #   last                      previous good check: time, uptime, counters
 # Days before today are gzipped, and days older than history_days removed.
 # 90 days at 5-minute checks with ~40 channels is about 4-8 MB.
@@ -451,6 +532,17 @@ tidy_store() {
 		fi
 	done
 	tidy_lineup
+	tidy_restarts
+}
+
+# Restarts older than the history kept, when there are any.
+tidy_restarts() {
+	local f="$DATA_DIR/restarts.csv" first since
+	[ -s "$f" ] || return 0
+	since=$(( $(date +%s) - HISTORY_DAYS * 86400 ))
+	first=$(sed -n '2s/,.*//p' "$f")
+	[ -n "$first" ] && [ "$(int_or "$first" 0)" -lt "$since" ] || return 0
+	awk -F, -v since="$since" 'NR == 1 || $1 + 0 >= since' "$f" > "$f.new" && mv -f "$f.new" "$f"
 }
 
 # The line-up file, once a day (and after a start): drop entries that only
@@ -904,7 +996,7 @@ do_clear() {
 	load_config
 	archive_export
 	rm -rf "$DATA_DIR/readings" "$DATA_DIR/channels" "$DATA_DIR/events" "$DATA_DIR/radios"
-	rm -f "$DATA_DIR/radios.last" "$DATA_DIR/events.seen" "$DATA_DIR/channelmap.csv" "$DATA_DIR/channelmap.last" "$DATA_DIR/last" "$RUN_DIR/export" "$RUN_DIR/lineup_tidied"
+	rm -f "$DATA_DIR/radios.last" "$DATA_DIR/restarts.csv" "$DATA_DIR/events.seen" "$DATA_DIR/channelmap.csv" "$DATA_DIR/channelmap.last" "$DATA_DIR/last" "$RUN_DIR/export" "$RUN_DIR/lineup_tidied"
 	ensure_store
 	log "history cleared"
 	echo '{"cleared":true}'
@@ -1064,6 +1156,68 @@ do_check() {
 	echo "ok: $model, $ds_n downstream and $us_n upstream channels, up ${uptime}s, ${new_events:-0} new events$([ $reboot = 1 ] && echo ', restarted since the last check')"
 }
 
+# ------------------------------------------------------------------- restart
+#
+# Restarting is the one thing Modem Health does to the modem; everything
+# else only reads. Every attempt is kept, in restarts.csv (for the limits
+# on automatic restarts and for the report) and as an event in the day's
+# events file, so that the report can tell a restart Modem Health made
+# from one the modem made on its own, and never blames the line for it.
+# TRIGGER: manual (the Restart button), down (no connection) or signal
+# (bad signal); DETAIL: why, in words.
+
+record_restart() { # $1=ts $2=trigger $3=ok|failed $4=detail $5=fail reason
+	local f="$DATA_DIR/restarts.csv" msg
+	[ -s "$f" ] || echo "$RESTARTS_HEADER" > "$f"
+	echo "$1,$2,$3,$(clean "$4"),$(clean "$5")" >> "$f"
+	if [ "$3" = ok ]; then
+		msg="Restarted by Modem Health: $4"
+	else
+		msg="Modem Health could not restart the modem ($5): $4"
+	fi
+	echo "$1,,,Notice,$(clean "$msg")" >> "$EVENTS"
+}
+
+# restart_modem TRIGGER DETAIL: the restart, with the lock already held.
+# Prints the result as JSON.
+restart_modem() {
+	local ts trigger=$1 detail=$2
+	ts=$(date +%s)
+	FAIL_REASON=
+	GW_PORT=
+	detect_device
+	if { [ "$DEVICE" = tmobile ] && gw_restart; } || { [ "$DEVICE" != tmobile ] && modem_with_session modem_restart; }; then
+		# The modem forgets its sessions when it restarts.
+		[ "$DEVICE" = tmobile ] || session_drop
+		record_restart "$ts" "$trigger" ok "$detail" ""
+		log "restarted the modem ($trigger: $detail)"
+		printf '{"ok":true,"device":%s,"ts":%s}\n' "$(json_str "$DEVICE")" "$ts"
+		return 0
+	fi
+	record_restart "$ts" "$trigger" failed "$detail" "$FAIL_REASON"
+	log "could not restart the modem: $FAIL_REASON"
+	printf '{"ok":false,"device":%s,"reason":%s}\n' "$(json_str "$DEVICE")" "$(json_str "$FAIL_REASON")"
+	return 1
+}
+
+do_restart() { # $1=trigger $2=detail
+	local trigger=${1:-manual} detail=$2
+	case $trigger in manual|down|signal) ;; *) echo '{"ok":false,"reason":"bad_trigger"}'; return 2 ;; esac
+	[ -n "$detail" ] || detail="asked for by hand"
+	load_config
+	mkdir -p "$RUN_DIR" && chmod 700 "$RUN_DIR"
+	ensure_store || { echo '{"ok":false,"reason":"cannot_store"}'; return 1; }
+	restart_modem "$trigger" "$detail"
+}
+
+# Checks and restarts take turns: both use the kept session and the
+# modem's timestamp rule.
+with_lock() {
+	local dir=${MODEMHEALTH_RUN_DIR:-/var/run/modemhealth}
+	mkdir -p "$dir" && chmod 700 "$dir"
+	( flock -x 9 && "$@" ) 9>"$dir/lock"
+}
+
 do_logout() {
 	load_config
 	mkdir -p "$RUN_DIR" && chmod 700 "$RUN_DIR"
@@ -1156,7 +1310,7 @@ do_daemon() {
 			continue
 		fi
 		base=$(( up + $(jitter) ))
-		( do_check ) >/dev/null 2>&1 &
+		( with_lock do_check ) >/dev/null 2>&1 &
 		CHECK_PID=$!
 		wait "$CHECK_PID"
 		CHECK_PID=""
@@ -1392,7 +1546,7 @@ do_set_password() {
 [ "${MODEMHEALTH_LIB:-}" = 1 ] && return 0 2>/dev/null
 
 case "$1" in
-	check) do_check ;;
+	check) with_lock do_check ;;
 	history) do_history "$2" ;;
 	last) do_last ;;
 	logout) do_logout ;;
@@ -1402,10 +1556,11 @@ case "$1" in
 	test) do_test "$2" ;;
 	test-input) do_test_input ;;
 	set-password) do_set_password ;;
+	restart) with_lock do_restart "$2" "$3" ;;
 	export) do_export ;;
 	clear) do_clear ;;
 	*)
-		echo "usage: modemhealth check|history [N]|last|logout|daemon|status|data SINCE [UNTIL]|test [FILE]|test-input|set-password|export|clear" >&2
+		echo "usage: modemhealth check|history [N]|last|logout|daemon|status|data SINCE [UNTIL]|test [FILE]|test-input|set-password|restart [TRIGGER [DETAIL]]|export|clear" >&2
 		exit 2
 		;;
 esac
