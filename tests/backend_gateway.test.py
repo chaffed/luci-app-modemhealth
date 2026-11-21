@@ -116,6 +116,11 @@ def main():
         steps.append("sleep 1; modemhealth restart > /out/gw_restart_refused/again.txt; "
                      "curl -s http://gw:%d/_control/log > /out/gw_restart_refused/gw_log.json; " % f1
                      + "sleep 1; echo label-password | modemhealth set-password >/dev/null; modemhealth restart > /out/gw_restart_refused/changed.txt")
+        # Automatic restart of a gateway with no connection (gw_restart=1).
+        scenario("gw_auto", gwr, ctl(f1, "reset") + "; " + ctl(f1, "set?allow_reboot=1") + "; " + pw + on
+                 + "uci set modemhealth.main.restart_auto=1; uci set modemhealth.main.ping_host=nonexistent.invalid; uci commit modemhealth; "
+                 "modemhealth check >/dev/null; echo \"$(( $(date +%s) - 660 )) 0\" > /var/run/modemhealth/auto")
+        steps.append("curl -s http://gw:%d/_control/log > /out/gw_auto/gw_log.json" % f1)
         steps.append(ctl(f1, "reset"))
         # 5. A G5AR: 4G block null, no clock, two bands.
         scenario("g5ar", config("gw:%d" % f1, "DATA", "tmobile"), ctl(f1, "reset"))
@@ -236,6 +241,10 @@ def main():
               and gwlog("gw_restart_refused").count("POST /TMI/v1/auth/login") == 1,
               "gateway restart, refused password: one login only; never tried again (%s)" % gwlog("gw_restart_refused"))
         check(j("gw_restart_refused", "changed.txt").get("ok") is True, "gateway restart: a changed password is tried again")
+        f = os.path.join(out, "gw_auto", "data", "restarts.csv")
+        rs = list(csv.DictReader(open(f))) if os.path.exists(f) else []
+        check(rs and rs[0]["trigger"] == "down" and rs[0]["result"] == "ok" and "no answer from nonexistent.invalid" in rs[0]["detail"]
+              and "POST /TMI/v1/gateway/reset?set=reboot" in gwlog("gw_auto"), "gateway: restarted automatically after no connection (%s)" % rs)
         for name in ("gw_restart_ok", "gw_restart_refused"):
             text = ""
             for dp, _, names in os.walk(os.path.join(out, name)):

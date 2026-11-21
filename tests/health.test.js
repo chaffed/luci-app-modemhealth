@@ -273,5 +273,32 @@ ok([ 'slow', 'fine', 'failed', 'unjudged' ].every(function(g) {
 eq([ H.speedTests([], PLAN, lineOf).n, H.speedTests(null, PLAN, { windowS: W }).n, H.speedTests([ okT(1, 1, 1) ], PLAN, {}).tests[0].line ], [ 0, 0, 'unknown' ],
 	'speed: no tests, or no history at all, is not an error');
 
+/* ------------------------------------------------ automatic restarts -- */
+/* The backend judges "outside the acceptable range" itself (signal_signs,
+ * for automatic restarts). Its table of bounds must be health.js's, and
+ * both are held to tests/fixtures/restart/signal.json (the backend in
+ * tests/backend.test.py). */
+(function() {
+	var backend = fs.readFileSync(path.join(__dirname, '..', 'luci-app-modemhealth/root/usr/bin/modemhealth'), 'utf8');
+	var table = /^ACCEPTABLE='([^']*)'/m.exec(backend)[1].split('\n').map(function(l) { return l.split(' '); });
+	var want = H.limitList().filter(function(it) { return /^(ds_|us_)/.test(it.key); }).map(function(it) {
+		var g = it.limit.good, m = it.limit.marginal, b = function(v) { return v == null ? '-' : String(v); };
+		return [ it.key, b(g[0]), b(g[1]), b(m[0]), b(m[1]) ];
+	});
+	eq(table, want, 'restarts: the backend\'s good and acceptable ranges are health.js\'s');
+	eq(+/^LOW_POWER_BELOW=(-?\d+)/m.exec(backend)[1], H.LIMITS.ds_snr_low_power.below_power, 'restarts: the same power below which the higher SNR minimum applies');
+	var fx = JSON.parse(fs.readFileSync(path.join(__dirname, 'fixtures/restart/signal.json'), 'utf8'));
+	fx.cases.forEach(function(c) {
+		var limits = H.applySettings(function(k) { return (c.limits || {})[k]; }).limits;
+		var usN = c.channels.filter(function(ch) { return ch.dir === 'us' && !/OFDM/i.test(ch.modulation); }).length;
+		var locked = function(ch) { return !ch.lock || /^locked$/i.test(ch.lock); };
+		var out = c.channels.filter(function(ch) {
+			return H.channelVerdict(ch, usN, limits).checks.some(function(x) { return x.metric !== 'lock' && x.level === H.BAD; });
+		}).length;
+		eq([ c.channels.filter(function(ch) { return !locked(ch); }).length, out,
+			c.channels.filter(function(ch) { return ch.dir === 'ds' && locked(ch); }).length ], c.expect, 'restarts fixture: ' + c.name);
+	});
+})();
+
 console.log(fail ? '\n' + fail + ' check(s) failed' : '\nall checks passed');
 process.exit(fail ? 1 : 0);

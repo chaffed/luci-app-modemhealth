@@ -42,10 +42,10 @@ eq(sorted(glOptions), sorted(luciOptions), 'the panel\'s form offers the same se
 eq(sorted(luaFields), sorted(luciOptions), 'the panel\'s module accepts the same settings, and no others');
 /* Settings with a default ship it in the package; the report details
  * (free text) have none. */
-var defaults = all(/^\toption (\w+) /gm, config), REPORT = [ 'isp_name', 'subscriber', 'account', 'service_address', 'export_dir' ];
+var defaults = all(/^\toption (\w+) /gm, config), REPORT = [ 'isp_name', 'subscriber', 'account', 'service_address', 'export_dir', 'restart_on_errors', 'restart_on_events' ];
 var withDefault = luciOptions.filter(function(n) { return REPORT.indexOf(n) < 0; });
 ok(withDefault.every(function(n) { return defaults.indexOf(n) >= 0; }) && REPORT.every(function(n) { return luciOptions.indexOf(n) >= 0 && defaults.indexOf(n) < 0; }),
-	'each has a default in /etc/config/modemhealth, except the four report details and the drive folder');
+	'each has a default in /etc/config/modemhealth, except the four report details, the drive folder and the two optional restart signs');
 var glDefaults = all(/(\w+): '/g, /var DEFAULTS = \{([^}]*)\}/.exec(gl)[1]);
 eq(sorted(glDefaults), sorted(withDefault), 'the panel\'s form knows the default of each');
 withDefault.forEach(function(n) {
