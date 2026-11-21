@@ -373,6 +373,12 @@ def main():
             ("restart_unreachable", config("modem:1", PASSWORD, "/out/restart_unreachable/data"), ":", ":", "modemhealth restart down 'no internet for 12 minutes'"),
             ("restart_bad_trigger", config(host, PASSWORD, "/out/restart_bad_trigger/data"), ":",
              "ls /out/restart_bad_trigger/data > /out/restart_bad_trigger/ls 2>&1 || true", "modemhealth restart restore"),
+            # Restarts reach the data reply, the drive copy and the report file.
+            ("restart_export", config(host, PASSWORD, "/out/restart_export/data", export_dir="/out/restart_export/drive/modemhealth"),
+             "modemhealth check >/dev/null; modemhealth restart >/dev/null; modemhealth check >/dev/null; modemhealth export >/dev/null",
+             "cp /out/restart_export/drive/modemhealth/modemhealth-restarts.csv /out/restart_export/drive_restarts.csv; "
+             "grep -c 'id=\"mh-restarts\"' /out/restart_export/drive/modemhealth/modemhealth-report.html > /out/restart_export/in_report || true",
+             "modemhealth data 0"),
             # A check and a restart at once take turns (lock): no request is
             # refused for its timestamp, and both succeed.
             ("restart_with_check", config(host, PASSWORD, "/out/restart_with_check/data"),
@@ -822,6 +828,14 @@ def main():
         check(open(os.path.join(d, "exit")).read().strip() == "2" and json.loads(open(os.path.join(d, "output.txt")).read())["reason"] == "bad_trigger"
               and json.load(open(os.path.join(d, "modem_state.json")))["requests"] == 0 and not restarts_of("restart_bad_trigger"),
               "restart: an unknown trigger is refused before the modem is contacted")
+
+        d = os.path.join(out, "restart_export")
+        dr = json.loads(open(os.path.join(d, "output.txt")).read())
+        rr = [l for l in dr.get("restarts", "").split("\n") if l]
+        check(rr[0] == "ts,trigger,result,detail,fail_reason" and len(rr) == 2 and ",manual,ok," in rr[1], "restart: in the data reply (%s)" % rr)
+        drive = [l for l in open(os.path.join(d, "drive_restarts.csv")).read().split("\n") if l]
+        check(drive == rr, "restart: copied to the drive (%s)" % drive)
+        check(open(os.path.join(d, "in_report")).read().strip() == "1", "restart: in the report file on the drive")
 
         state, readings = scenario("restart_with_check")
         res = json.loads(open(os.path.join(out, "restart_with_check", "output.txt")).read())

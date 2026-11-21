@@ -8,7 +8,7 @@
 
 case "$1" in
 	list)
-		echo '{"status":{},"data":{"since":0,"until":0},"check":{},"test":{"host":"str","username":"str","password":"str"},"set_password":{"password":"str"},"export":{},"clear":{}}'
+		echo '{"status":{},"data":{"since":0,"until":0},"check":{},"test":{"host":"str","username":"str","password":"str"},"set_password":{"password":"str"},"export":{},"clear":{},"restart":{}}'
 		;;
 	call)
 		case "$2" in
@@ -41,6 +41,11 @@ case "$1" in
 				;;
 			clear)
 				/usr/bin/modemhealth clear
+				;;
+			restart)
+				# Restarts the modem (the Restart button); recorded as
+				# asked for by hand.
+				/usr/bin/modemhealth restart manual
 				;;
 			set_password)
 				read -r input

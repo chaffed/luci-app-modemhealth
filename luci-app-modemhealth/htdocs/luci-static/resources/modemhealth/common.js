@@ -21,6 +21,7 @@ var callTest = rpc.declare({ object: 'luci.modemhealth', method: 'test', params:
 var callSetPassword = rpc.declare({ object: 'luci.modemhealth', method: 'set_password', params: [ 'password' ] });
 var callExport = rpc.declare({ object: 'luci.modemhealth', method: 'export' });
 var callClear = rpc.declare({ object: 'luci.modemhealth', method: 'clear' });
+var callRestart = rpc.declare({ object: 'luci.modemhealth', method: 'restart' });
 
 var SVGNS = 'http://www.w3.org/2000/svg';
 
@@ -110,8 +111,9 @@ function assemble(d) {
 	});
 	var radios = parseCSV(d.radios), radiosAt = {};
 	radios.forEach(function(r) { (radiosAt[r.ts] = radiosAt[r.ts] || []).push(r); });
+	var restarts = parseCSV(d.restarts).map(function(r) { r.ts = +r.ts; return r; });
 	return { readings: parseCSV(d.readings), channels: channels, channelsAt: byTs, radios: radios, radiosAt: radiosAt,
-		events: events, speed: speedData(d.speed) };
+		events: events, restarts: restarts, speed: speedData(d.speed) };
 }
 
 /* A reading of a T-Mobile gateway rather than a cable modem: it has radios,
@@ -147,6 +149,14 @@ function pieces(since, until, intervalMin) {
 	return out;
 }
 
+/* The restarts file is one file, not one per day: every piece of a period
+ * gets the rows of its own time, but keep each once, oldest first. */
+function uniqueRestarts(rows) {
+	var seen = {};
+	return rows.filter(function(r) { var k = r.ts + ',' + r.trigger + ',' + r.result; if (seen[k]) return false; seen[k] = 1; return true; })
+		.sort(function(a, b) { return a.ts - b.ts; });
+}
+
 function inPeriod(since, until) {
 	return function(e) { return e.ts >= since && e.ts <= until; };
 }
@@ -162,10 +172,12 @@ function load(since, until, intervalMin) {
 				return i ? t.slice(t.indexOf('\n') + 1) : t;
 			}).join('');
 		};
-		var D = assemble({ readings: join('readings'), channels: join('channels'), events: join('events'), radios: join('radios'), channelmap: join('channelmap') });
+		var D = assemble({ readings: join('readings'), channels: join('channels'), events: join('events'), radios: join('radios'),
+			restarts: join('restarts'), channelmap: join('channelmap') });
 		D.speed = parts.reduce(function(all, p) { return addSpeed(all, speedData((p || {}).speed)); }, null);
 		D.since = since; D.until = until;
 		D.events = D.events.filter(inPeriod(since, until)).sort(function(a, b) { return a.ts - b.ts; });
+		D.restarts = uniqueRestarts(D.restarts.filter(inPeriod(since, until)));
 		D.readings.sort(function(a, b) { return a.ts - b.ts; });
 		return D;
 	});
@@ -237,6 +249,7 @@ function reduce(G, P) {
 		G.readings.push(r);
 	});
 	P.events.forEach(function(e) { G.events.push(e); });
+	(P.restarts || []).forEach(function(r) { G.restarts.push(r); });
 	G.speed = addSpeed(G.speed, P.speed);
 }
 
@@ -246,12 +259,13 @@ function reduce(G, P) {
  *    .latest the newest good reading with its channels. */
 function loadDigest(since, until, intervalMin, limits, progress) {
 	var G = { since: since, until: until, interval: intervalMin || 5, limits: limits || health.LIMITS,
-		readings: [], events: [], channels: {}, radios: {}, gateway: false, latest: null, speed: null, judged: true };
+		readings: [], events: [], restarts: [], channels: {}, radios: {}, gateway: false, latest: null, speed: null, judged: true };
 	var todo = pieces(since, until, intervalMin), i = 0;
 	var next = function() {
 		if (i >= todo.length) {
 			G.readings.sort(function(a, b) { return a.ts - b.ts; });
 			G.events = G.events.filter(inPeriod(since, until)).sort(function(a, b) { return a.ts - b.ts; });
+			G.restarts = uniqueRestarts(G.restarts.filter(inPeriod(since, until)));
 			return analyse(G, G.interval, G.limits);
 		}
 		var batch = todo.slice(i, i + 4);
@@ -283,12 +297,15 @@ function analyse(D, intervalMin, limits) {
 	D.outages = outages;
 	D.reregistrations = health.reregistrations(disruptive);
 	D.reboots = D.readings.filter(function(r) { return r.reboot === '1'; });
+	/* Restarts Modem Health made, and what they caused: not the line's. */
+	D.restarts = D.restarts || [];
+	D.own = health.ownRestarts(D.readings, D.restarts, outages, Math.max(900, (intervalMin || 5) * 60 + 60));
 	D.period = health.periodVerdict({
 		hours: hours,
 		readings: D.readings.map(function(r) { return { ts: r.ts, level: r.verdict.level }; }),
 		events: disruptive,
-		reboots: D.reboots.length,
-		outages: outages
+		reboots: D.reboots.filter(function(r) { return !r.byModemHealth; }).length,
+		outages: outages.filter(function(o) { return !o.byModemHealth; })
 	}, limits);
 	D.period.hours = hours;
 	/* ISPy's speed tests of the period, each lined up with what the modem
@@ -691,7 +708,7 @@ function gatewayText(r) {
 return baseclass.extend({
 	C: C, health: health, gatewayText: gatewayText, isGateway: isGateway, verdictOf: verdictOf,
 	callStatus: callStatus, callData: callData, callCheck: callCheck, callTest: callTest, callSetPassword: callSetPassword,
-	callExport: callExport, callClear: callClear,
+	callExport: callExport, callClear: callClear, callRestart: callRestart,
 	parseCSV: parseCSV, load: load, loadDigest: loadDigest, analyse: analyse, toCSV: toCSV, csvField: csvField, esc: esc,
 	fmtTime: fmtTime, isoTime: isoTime, fmtShort: fmtShort, fmtDuration: fmtDuration, fmtNum: fmtNum, fmtInt: fmtInt, fmtLimit: fmtLimit,
 	LEVEL_TEXT: LEVEL_TEXT, reasonText: reasonText, groupReasons: groupReasons, groupedText: groupedText,

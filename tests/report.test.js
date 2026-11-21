@@ -53,7 +53,8 @@ function router(made, has) {
 			var l = t.split('\n').filter(Boolean);
 			return [ l[0] ].concat(l.slice(1).filter(function(r) { var ts = +r.split(',')[0]; return ts >= since && ts <= until; })).join('\n') + '\n';
 		};
-		var reply = { readings: cut(all.readings), channels: cut(all.channels), events: cut(all.events), radios: cut(all.radios), channelmap: made.files['channelmap.csv'] || '' };
+		var reply = { readings: cut(all.readings), channels: cut(all.channels), events: cut(all.events), radios: cut(all.radios), channelmap: made.files['channelmap.csv'] || '',
+			restarts: made.files['restarts.csv'] ? cut(made.files['restarts.csv']) : '' };
 		if (has.ispy) {
 			/* What the backend passes on of ISPy's file: these columns, without the skipped tests. */
 			var rows = made.ispy.results.split('\n').slice(1).filter(Boolean).map(function(l) { return l.split(','); })
@@ -380,7 +381,32 @@ async function gatewayTests() {
 		'cable report: no 4G/5G limit or source in its limits table');
 }
 
-main().then(gatewayTests).catch(function(e) { fail++; console.log('FAIL ' + (e.stack || e)); }).then(function() {
+/* Restarts Modem Health made (#39): listed, never held against the line. */
+async function restartTests() {
+	var made = gen.make(NOW, 3, { restarts: true }), g = router(made), T = made.times;
+	var plain = router(gen.make(NOW, 3, {}));
+	var G = await g.mh.loadDigest(NOW - 3 * 86400, NOW, 5), G0 = await plain.mh.loadDigest(NOW - 3 * 86400, NOW, 5);
+	eq(G.restarts.map(function(x) { return [ x.ts, x.result ]; }), [ [ T.mh, 'ok' ], [ T.mhFailed, 'failed' ] ], 'restarts: the digest has both attempts, once each');
+	eq([ G.reboots.length - G0.reboots.length, G.reboots.filter(function(r) { return r.byModemHealth; }).length ], [ 1, 1 ],
+		'restarts: the modem restart it caused is marked as Modem Health\'s');
+	var own = G.outages.filter(function(o) { return o.byModemHealth; });
+	ok(own.length === 1 && own[0].start > T.mh && own[0].start - T.mh <= 900, 'restarts: the outage right after it is marked too');
+	eq([ G.period.counts.reboots, G.period.counts.outages ], [ G0.period.counts.reboots, G0.period.counts.outages ],
+		'restarts: the period counts the same restarts and outages as without Modem Health\'s restart');
+	var t = text(g.rb.build(G, { modem: MODEM, generated: NOW }).body);
+	ok(/Modem Health restarted the modem 1 time \(0 automatically, 1 by hand\); 1 more attempt could not be made\. 1 modem restart and 1 outage that followed them are listed in section 3 but not held against the line\./.test(t),
+		'report: says what Modem Health did and that it is not held against the line' + (/Modem Health restarted[^.]*\.[^.]*\./.exec(t) || [''])[0]);
+	ok(/Restarts by Modem Health[\s\S]*by hand – asked for by hand[\s\S]*restarted[\s\S]*automatically: bad signal – bad signal in 3 checks in a row \(2 channel\(s\) not locked\)[\s\S]*not restarted \(unreachable\)/.test(t),
+		'report: a table of the restarts, why, and whether they worked');
+	ok(/\(after a restart by Modem Health; not counted\)/.test(t), 'report: the outage after it is shown, marked not counted');
+	ok(/The modem restarted 1 time on its own\./.test(t), 'report: the modem\'s own restart counted as before');
+	var D = await g.mh.load(NOW - 86400, NOW, 5);
+	g.mh.analyse(D, 5);
+	ok(D.restarts.length === 2 && D.events.some(function(e) { return e.kind === 'mh_restart'; }) && D.own.reboots === 1,
+		'restarts: loaded whole, the same (and the events have their own kind)');
+}
+
+main().then(gatewayTests).then(restartTests).catch(function(e) { fail++; console.log('FAIL ' + (e.stack || e)); }).then(function() {
 	console.log(fail ? '\n' + fail + ' check(s) failed' : '\nall checks passed');
 	process.exit(fail ? 1 : 0);
 });

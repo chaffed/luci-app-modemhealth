@@ -25,6 +25,7 @@ exports.READINGS = 'ts,result,reason,model,firmware,uptime_s,connectivity,boot,n
 exports.CHANNELS = 'ts,dir,channel_id,lock,power_dbmv,snr_db,corrected,uncorrectable';
 exports.EVENTS = 'first_seen_ts,modem_time,clock_offset_s,level,message';
 exports.CHANNELMAP = 'ts,dir,ch,channel_id,modulation,freq_hz,width_hz';
+exports.RESTARTS = 'ts,trigger,result,detail,fail_reason';
 exports.ISPY = 'ts,backend,server,ping_ms,jitter_ms,loss_pct,loaded_down_ms,loaded_up_ms,down_mbps,up_mbps,bytes,status,message,wan_down_mbps,wan_up_mbps,bg_down_mbps,bg_up_mbps,cpu_down_pct,cpu_up_pct,link_mbps,dev';
 exports.HOSTILE = [ '<img src=x onerror=window.__xss=1>', '<b onmouseover=window.__xss=2>Critical</b>', '<script>window.__xss=3</script>S34' ];
 
@@ -46,7 +47,11 @@ function day(ts) { return new Date(ts * 1000).toISOString().slice(0, 10); }
  *   ispy: { results: text of ISPy's results file, plan_down, plan_up (Mbit/s, as set in ISPy),
  *           times: { outage, failed, dip, sync, wan, quiet: when the tests made for those moments started } }
  * }
- * opts.interval: minutes between checks (default 5); opts.hostile, opts.good: see above. */
+ * opts.interval: minutes between checks (default 5); opts.hostile, opts.good: see above.
+ * opts.restarts: Modem Health restarted the modem 12 hours ago (with no
+ * connection: the modem reboots and the next check finds the internet still
+ * down), and tried once more 6 hours ago without success: restarts.csv and
+ * their events (times.mh, times.mhFailed, times.mhBoot). */
 exports.make = function(now, days, opts) {
 	opts = opts || {};
 	var step = (opts.interval || 5) * 60, seed = 7;
@@ -66,6 +71,8 @@ exports.make = function(now, days, opts) {
 	};
 	if (opts.good)
 		T = { gap: [ 0, 0 ], lone: 0, dip: [ 0, 0 ], outage: [ 0, 0 ], failed: 0 };
+	if (opts.restarts) { T.mh = now - 12 * 3600 + 30; T.mhFailed = now - 6 * 3600 + 30; }
+	var mhDone = false;
 	var files = {}, counts = { readings: 0, failed: 0, restarts: 0, events: 0 }, stamps = [];
 	var add = function(name, header, line) { files[name] = (files[name] || header + '\n') + line + '\n'; };
 	var boot = start - 9 * 86400 - 4000, restartPending = false, lineDownNext = false;
@@ -90,6 +97,9 @@ exports.make = function(now, days, opts) {
 		}
 		var reboot = 0, bootTs = '';
 		if (restartPending) { boot = ts - 95; reboot = 1; bootTs = boot; restartPending = false; counts.restarts++; T.restart = boot; }
+		if (T.mh && !mhDone && ts > T.mh) {
+			mhDone = true; boot = T.mh + 25; reboot = 1; bootTs = boot; T.mhBoot = boot; lineDownNext = true;
+		}
 		var inet = lineDownNext ? 100 : (rnd() < 0.01 && !opts.good ? 33 : 0);
 		lineDownNext = false;
 		add(r, exports.READINGS, [ ts, 'ok', '', model, firmware, ts - boot, 'Operational', 'Operational', 'Allowed', modemTime(ts + 2), ds.length, us.length,
@@ -150,6 +160,13 @@ exports.make = function(now, days, opts) {
 	});
 	files['events.seen'] = seen.join('\n') + '\n';
 	files['modem.txt'] = [ 'model=' + model, 'firmware=' + firmware, 'mac=00:00:5E:00:53:01', 'docsis=DOCSIS 3.1' ].join('\n') + '\n';
+	if (T.mh) {
+		files['restarts.csv'] = exports.RESTARTS + '\n' + T.mh + ',manual,ok,asked for by hand,\n' +
+			T.mhFailed + ',signal,failed,bad signal in 3 checks in a row (2 channel(s) not locked),unreachable\n';
+		add('events/' + day(T.mh) + '.csv', exports.EVENTS, [ T.mh, '', '', 'Notice', 'Restarted by Modem Health: asked for by hand' ].join(','));
+		add('events/' + day(T.mhFailed) + '.csv', exports.EVENTS, [ T.mhFailed, '', '', 'Notice',
+			'Modem Health could not restart the modem (unreachable): bad signal in 3 checks in a row (2 channel(s) not locked)' ].join(','));
+	}
 
 	/* ISPy on the same router: a test an hour (from a day before Modem
 	 * Health's first check, and not while the router was off), plus tests
