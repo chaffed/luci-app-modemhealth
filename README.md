@@ -31,6 +31,11 @@ GL.iNet GL-BE9300 (Flint 3) behind an ARRIS SURFboard S34.
   off", and it notices when the modem has restarted.
 - **Counts lost data.** Corrected and uncorrectable codewords are stored as
   the change since the previous check.
+- **Can restart a stuck modem** (off unless you switch it on): when the
+  modem answers but has lost its connection, or, if you want, after bad
+  signal. Limited to 1 an hour and 3 a day by default, and every restart is
+  recorded so the report never blames the line for it. See
+  [Restarting the modem](#restarting-the-modem).
 - **Stores failures honestly.** A check that could not read the modem is
   stored as *failed* with its reason, never as a healthy or empty reading.
 - **Report for your provider** (see below), on the page, as a PDF, or as one
@@ -227,6 +232,7 @@ could change it. LuCI keeps working either way.
 | Internet host to ping | `1.1.1.1` | Pinged at every check to find outages. |
 | Keep history for | 90 days | About 4–8 MB at 5-minute checks. |
 | Copy to a USB drive | off | A folder on an attached drive (see below). |
+| Restarts | off | Restart the modem automatically: see [Restarting the modem](#restarting-the-modem). |
 | Report details | empty | Provider, name, account number and address, printed on the report. |
 | Health limits | sourced defaults | See below. |
 
@@ -255,6 +261,52 @@ Modem Health's own judgement, on the Settings page and in the report.
 You can change any limit in **Settings → Health limits**. A changed limit is
 marked as yours in the Overview and the report, which then no longer cite
 the default's sources for it.
+
+## Restarting the modem
+
+Restarting is the one thing Modem Health can do to the modem. It does it the
+way the **Restart** button on the modem's own Configuration page does,
+sending the modem's Ethernet and LED settings back unchanged. It can never
+send the factory reset that sits next to that button.
+
+- **The Restart modem… button** on the Overview restarts a SURFboard now,
+  after asking. Expect a few minutes without internet.
+- **Automatic restarts** are off unless you switch them on in **Settings →
+  Restarts**:
+
+  | Setting | Default | What it does |
+  |---|---|---|
+  | Restart the modem automatically | off | Turns the rest on. |
+  | After no connection for | 10 minutes | The modem answers the router, but the internet host doesn't, or the modem is not "Operational", or no downstream channel is locked. |
+  | Also restart after bad signal | off | Then: after this many bad checks in a row (3). A check is bad when it shows a sign you choose: a channel not locked, a channel outside the acceptable range, at least *N* uncorrectable errors, or at least *N* disruptive log entries (T3/T4 time-outs, loss of sync). |
+  | At most this many an hour / a day | 1 / 3 | Then it stops, and the Overview says the restart was held back. |
+
+  Nothing counts for 15 minutes after a restart while the modem comes back.
+  A modem that doesn't answer at all can't be restarted from the router
+  (that needs a smart plug).
+- **Everything is recorded.** Each restart, and each attempt that failed,
+  is an event and a line in `restarts.csv`. The report lists them and does
+  not hold against the line the modem restart and the outage that a
+  restart by Modem Health caused. An outage that was already going on is
+  still counted.
+- **A restart can't fix a line fault.** It can hide one for a while. If
+  restarts keep being needed, the provider has to look at the line, and the
+  report says so. Restarting on bad signal is off by default for that
+  reason.
+
+**T-Mobile gateways:** the backend can restart them (log in once, then the
+gateway's reboot call), but no one has tested this on a real gateway yet,
+so there's no button for them. To try it, if you have one, save the
+gateway's admin password in Settings and then run:
+
+```sh
+uci set modemhealth.main.gw_restart=1; uci commit modemhealth
+modemhealth restart manual "testing"
+```
+
+A refused password is never tried again until you change it, because
+repeated failed logins lock the gateway's admin page. Please report how it
+went in an issue.
 
 ## Copy on a USB drive
 
@@ -308,8 +360,10 @@ firmware a drive appears as `/tmp/mountd/disk1_part1`).
   log is not filled with its own logins. A new login happens when the
   session ends: after a router restart, or after 10–15 minutes without a
   check.
-- **Modem Health only reads.** It never restarts the modem or changes
-  anything on it. On a T-Mobile gateway it does not even log in.
+- **Modem Health only reads**, unless you restart the modem from it or
+  switch on automatic restarts. It never changes the modem's settings. On a
+  T-Mobile gateway it doesn't log in at all, unless you set it up to restart
+  the gateway (see [Restarting the modem](#restarting-the-modem)).
 - **The router's clock.** After a restart the checks wait until the clock is
   set from the internet, so every reading has the right time.
 - **History survives** reboots and firmware upgrades that keep settings. It
@@ -328,6 +382,8 @@ firmware a drive appears as `/tmp/mountd/disk1_part1`).
 | "Something answered at this address, but not like a T-Mobile 5G gateway" | The address is not the gateway's (it is usually `192.168.12.1`), or the gateway is a model Modem Health does not read yet. A [capture](#helping-add-a-t-mobile-gateway) helps. |
 | "Waiting for the router's clock to be set" | The router has just started and has no internet time yet. Checks begin when it has. |
 | Checks stored as failed: `timeout`, `unreachable` | The modem did not answer in time. During an outage this is expected; the pings tell whether the internet was gone too. |
+| "Modem Health would restart the modem …, but automatic restarts are limited to …" | The modem keeps losing its connection, and the limit you set is reached. Modem Health waits rather than restarting again. The line needs the provider. |
+| "The modem was not restarted" | The reason follows. A modem that doesn't answer can't be restarted from the router. |
 | "No drive is connected at …" | The USB folder is not on a mounted drive. Nothing is lost; replug the drive or choose another folder. |
 | No **Modem Health** entry in the GL panel | Log out of the panel and in again. If it is still missing: `ssh root@192.168.8.1 /usr/sbin/nginx -s reload`. |
 
@@ -400,6 +456,7 @@ modemhealth check      # read the modem now and store the reading
 modemhealth last       # the latest stored reading
 modemhealth history 12 # the last 12 readings
 modemhealth status     # scheduler state and modem identity, as JSON
+modemhealth restart    # restart the modem now (recorded as asked for by hand)
 modemhealth export     # save the history and the report to the USB drive now
 modemhealth clear      # delete the history (the copy on a drive is kept)
 ```
@@ -411,7 +468,7 @@ modemhealth clear      # delete the history (the copy on a drive is kept)
 | Modem reader, storage and scheduler | `/usr/bin/modemhealth` (POSIX shell, busybox-compatible) |
 | Service | `/etc/init.d/modemhealth` (procd) |
 | Settings; modem password | `/etc/config/modemhealth`; `/etc/config/modemhealth_auth` (root only) |
-| History | `/etc/modemhealth/` (daily CSV files; days before today are gzipped) |
+| History | `/etc/modemhealth/` (daily CSV files; days before today are gzipped; `restarts.csv`) |
 | LuCI ↔ router | `/usr/libexec/rpcd/luci.modemhealth` (ubus `luci.modemhealth`) |
 | Health rules, with every limit and its source | `/www/luci-static/resources/modemhealth/health.js` |
 | Loading, charts; the report | `/www/luci-static/resources/modemhealth/common.js`; `report.js` |
