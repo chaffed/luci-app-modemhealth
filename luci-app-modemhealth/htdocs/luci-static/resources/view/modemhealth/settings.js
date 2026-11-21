@@ -19,6 +19,7 @@ var REASONS = {
 	unreachable: _('The modem did not answer at this address. Is it a cable modem in bridge mode, connected to the router\'s WAN port?'),
 	timeout: _('Nothing answered at this address in time. Check the modem address, and that the modem is on and connected to the router\'s WAN port.'),
 	tls_error: _('Could not set up a secure connection to the modem.'),
+	login_not_ready: _('The modem is not accepting logins yet. After a restart it can take about 15 minutes; checks begin again on their own.'),
 	not_a_supported_modem: _('Something answered at this address, but it is not a supported modem (SURFboard S33 or S34).'),
 	not_a_supported_device: _('Something answered at this address, but not like a T-Mobile 5G gateway. Check the address (usually 192.168.12.1) and the modem type.'),
 	bad_reply: _('The modem\'s reply could not be read.'),

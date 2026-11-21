@@ -469,6 +469,7 @@
 	var REASONS = {
 		no_password: _('No password entered.'),
 		login_refused: _('The modem refused the user name or password.'),
+		login_not_ready: _('The modem is not accepting logins yet. After a restart it can take about 15 minutes; checks begin again on their own.'),
 		unreachable: _('The modem did not answer at this address. Is it a cable modem in bridge mode, connected to the router\'s WAN port?'),
 		timeout: _('Nothing answered at this address in time. Check the modem address, and that the modem is on and connected to the router\'s WAN port.'),
 		tls_error: _('Could not set up a secure connection to the modem.'),

@@ -37,7 +37,7 @@ SHARE=${MODEMHEALTH_SHARE:-/usr/share/modemhealth}
 WWW=${MODEMHEALTH_WWW:-/www/luci-static/resources/modemhealth}
 # The report file on a drive carries this many days of history.
 REPORT_DAYS=30
-VERSION=1.2.0   # the package's PKG_VERSION (tests/settings.test.js checks)
+VERSION=1.2.1   # the package's PKG_VERSION (tests/settings.test.js checks)
 HNAP_NS='http://purenetworks.com/HNAP1/'
 STATUS_ACTIONS='GetCustomerStatusStartupSequence GetCustomerStatusConnectionInfo GetCustomerStatusDownstreamChannelInfo GetCustomerStatusUpstreamChannelInfo GetCustomerStatusSoftware GetCustomerStatusLog'
 # Stored per day, in DATA_DIR/readings/ and DATA_DIR/channels/ (see storage).
@@ -167,6 +167,10 @@ modem_login() {
 	challenge=$(jsonfilter -i "$out" -e '@.LoginResponse.Challenge' 2>/dev/null)
 	public_key=$(jsonfilter -i "$out" -e '@.LoginResponse.PublicKey' 2>/dev/null)
 	cookie=$(jsonfilter -i "$out" -e '@.LoginResponse.Cookie' 2>/dev/null)
+	# RELOAD: the modem's own login page then just loads itself again. A
+	# real S34 answers every login so for a while after a restart (seen for
+	# about 15 minutes on 2026-11-21); it is not ready, not unsupported.
+	if [ "$(jsonfilter -i "$out" -e '@.LoginResponse.LoginResult' 2>/dev/null)" = RELOAD ]; then FAIL_REASON=login_not_ready; return 1; fi
 	if [ -z "$challenge" ] || [ -z "$public_key" ]; then FAIL_REASON=not_a_supported_modem; return 1; fi
 
 	PRIVATE_KEY=$(hmac "$public_key$PASSWORD" "$challenge")
@@ -178,6 +182,7 @@ modem_login() {
 	case $result in
 		OK|OK_CHANGED) return 0 ;;
 		FAILED) FAIL_REASON=login_refused ;;
+		RELOAD) FAIL_REASON=login_not_ready ;;
 		'') FAIL_REASON=bad_reply ;;
 		*) FAIL_REASON="login_$(clean "$result")" ;;
 	esac

@@ -298,6 +298,7 @@ var RESTART_FAILED = {
 	unreachable: _('the modem did not answer.'),
 	timeout: _('the modem did not answer in time.'),
 	login_refused: _('the modem refused the saved password.'),
+	login_not_ready: _('the modem is not accepting logins yet (as for a while after a restart).'),
 	no_password: _('no modem password is saved.'),
 	restart_unknown_settings: _('the modem\'s settings page answered in a way Modem Health does not know, so nothing was sent.')
 };

@@ -383,6 +383,7 @@ firmware a drive appears as `/tmp/mountd/disk1_part1`).
 | "Waiting for the router's clock to be set" | The router has just started and has no internet time yet. Checks begin when it has. |
 | Checks stored as failed: `timeout`, `unreachable` | The modem did not answer in time. During an outage this is expected; the pings tell whether the internet was gone too. |
 | "Modem Health would restart the modem …, but automatic restarts are limited to …" | The modem keeps losing its connection, and the limit you set is reached. Modem Health waits rather than restarting again. The line needs the provider. |
+| Checks failed with `login_not_ready` after a restart | The modem doesn't accept logins for a while after it restarts (about 15 minutes on an S34). Checks resume on their own. |
 | "The modem was not restarted" | The reason follows. A modem that doesn't answer can't be restarted from the router. |
 | "No drive is connected at …" | The USB folder is not on a mounted drive. Nothing is lost; replug the drive or choose another folder. |
 | No **Modem Health** entry in the GL panel | Log out of the panel and in again. If it is still missing: `ssh root@192.168.8.1 /usr/sbin/nginx -s reload`. |
