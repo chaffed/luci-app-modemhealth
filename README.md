@@ -1,8 +1,9 @@
 # Modem Health
 
 **Modem Health** is an app for OpenWrt and GL.iNet routers that watches your
-cable modem. Every few minutes the router logs in to the modem, reads its
-signal levels, error counts and event log, and keeps them. It shows whether
+cable modem, or your T-Mobile 5G Home Internet gateway. Every few minutes the
+router reads the modem's signal levels, error counts and event log (or the
+gateway's 4G and 5G signal), and keeps them. It shows whether
 the line is healthy, and builds a **printable report** for your provider's
 support or a technician: when the line dropped, which values were out of
 spec, and against which published limits.
@@ -50,13 +51,44 @@ top are losses of sync, time-outs and modem restarts.</sub>
 |---|---|
 | ARRIS / Vantiva SURFboard **S34** | Works. Developed and tested on one (firmware `AT01.01.010.042324_S3.04.735`). |
 | ARRIS / Vantiva SURFboard **S33** | Should work: it shares the S34's firmware family and login. Not yet tested on a real one. |
-| T-Mobile 5G Home Internet gateways (KVD21, 5688W, TMO-G4AR/G4SE, TMO-G5AR/G5SE, Nokia 5G21) | In progress ([#28](https://github.com/chaffed/luci-app-modemhealth/issues/28)). Nobody on the project has one yet: if you do, [a 5-minute capture](#helping-add-a-t-mobile-gateway) is the most useful help there is. |
+| T-Mobile 5G Home Internet gateways: Arcadyan KVD21, Sagemcom 5688W, TMO-G4AR/G4SE, TMO-G5AR/G5SE | **New, and not yet tested on a real gateway.** Built from what open-source gateway tools publish about these gateways ([#28](https://github.com/chaffed/luci-app-modemhealth/issues/28)). If you have one, please try it, and send [a 5-minute capture](#helping-add-a-t-mobile-gateway). See [T-Mobile 5G gateways](#t-mobile-5g-gateways). |
+| T-Mobile's older Nokia 5G21 ("trash can") | Not supported yet: it speaks another language. The capture tool saves what it needs. |
 | Anything else | Not supported yet. **Test connection** in Settings says so. See [Helping add another modem](#helping-add-another-modem). |
 
 The modem has to be a plain cable modem with the router behind it (not a
 combined modem-router), and the router has to reach the modem's own web page.
 SURFboards answer at `192.168.100.1` through the router's WAN port without
 any extra setup.
+
+### T-Mobile 5G gateways
+
+T-Mobile's gateways have no bridge mode, so your router sits behind the
+gateway: plug the router's WAN port into the gateway's LAN port, and the
+router gets an address in `192.168.12.x`. Then, in **Settings**:
+
+1. Set **Modem** to *T-Mobile 5G Home Internet gateway* (or leave it on
+   *Detect*), and **Modem address** to `192.168.12.1`.
+2. Press **Test connection**. It should name the gateway, its firmware and
+   its 4G and 5G radios with their signal. **No password is needed**: Modem
+   Health reads only the status the gateway shows without a login, and never
+   logs in (failed logins can lock the gateway's admin page).
+3. Save.
+
+What it keeps for a gateway: for each 4G and 5G radio, its band, signal
+bars, RSRP, RSRQ, SINR and RSSI and the tower it is on; whether the gateway
+is registered on the network; restarts; outages; and an event each time the
+gateway changes tower or band or loses its 5G (or 4G) connection.
+
+The signal is judged against **Teltonika's published recommendations**
+(RSRP good from -90 dBm, acceptable from -100; RSRQ good from -15 dB; SINR
+good from 13 dB, poor at 0 or below), which Digi's agree with. Neither 3GPP,
+which writes the 4G and 5G standards, nor T-Mobile publishes what counts as
+good, and the report says so. As for cable modems, you can change every
+limit in Settings.
+
+The report names the towers by their IDs (eNB/gNB and cell). Those are
+evidence T-Mobile can look up, but they also say roughly where you live:
+think before posting a report in public.
 
 ## The report
 
@@ -187,7 +219,8 @@ could change it. LuCI keeps working either way.
 
 | Setting | Default | What it does |
 |---|---|---|
-| Modem address | `192.168.100.1` | Where the modem's web page is. |
+| Modem | Detect | SURFboard cable modem, T-Mobile 5G gateway, or Detect (a SURFboard at `192.168.100.1`, a gateway elsewhere). |
+| Modem address | `192.168.100.1` | Where the modem's web page is (`192.168.12.1` for a T-Mobile gateway). |
 | User name, password | `admin`, none | The modem's own login. |
 | Check the modem on a schedule | on | Turn the checks off without removing the app. |
 | Check every | 5 minutes | 1 to 15 minutes. More than 15 risks losing log entries on a bad line. |
@@ -262,7 +295,9 @@ firmware a drive appears as `/tmp/mountd/disk1_part1`).
 - **What is stored**: signal values, error counts, the modem's log, and the
   modem's model, firmware and MAC address (the provider needs the MAC
   address to find your line). Public IP addresses in the modem's log are not
-  stored.
+  stored. For a T-Mobile gateway: the tower and cell IDs, which locate your
+  home roughly; nothing from the SIM (IMEI, phone number) and nothing about
+  the devices on your network is ever read.
 - **Your report details** are stored in the router's settings and printed on
   the report, which is what they are for.
 
@@ -274,7 +309,7 @@ firmware a drive appears as `/tmp/mountd/disk1_part1`).
   session ends: after a router restart, or after 10–15 minutes without a
   check.
 - **Modem Health only reads.** It never restarts the modem or changes
-  anything on it.
+  anything on it. On a T-Mobile gateway it does not even log in.
 - **The router's clock.** After a restart the checks wait until the clock is
   set from the internet, so every reading has the right time.
 - **History survives** reboots and firmware upgrades that keep settings. It
@@ -289,7 +324,8 @@ firmware a drive appears as `/tmp/mountd/disk1_part1`).
 | "Something answered at this address, but it is not a supported modem" or "The modem answered 'not found'" | The modem is not an S33 or S34. See [Helping add another modem](#helping-add-another-modem). |
 | "The modem refused the user name or password" | Log in at `https://192.168.100.1` in a browser to check them. The user name is usually `admin`. |
 | "The modem did not answer at this address" | The router cannot reach the modem's web page. Check that `https://192.168.100.1` opens from a computer behind the router. A VPN or a second WAN on the router can get in the way. |
-| "Modem Health needs your modem's password" | None is saved yet: Settings. |
+| "Modem Health needs your modem's password" | None is saved yet: Settings. (A T-Mobile gateway needs none; set **Modem** to it.) |
+| "Something answered at this address, but not like a T-Mobile 5G gateway" | The address is not the gateway's (it is usually `192.168.12.1`), or the gateway is a model Modem Health does not read yet. A [capture](#helping-add-a-t-mobile-gateway) helps. |
 | "Waiting for the router's clock to be set" | The router has just started and has no internet time yet. Checks begin when it has. |
 | Checks stored as failed: `timeout`, `unreachable` | The modem did not answer in time. During an outage this is expected; the pings tell whether the internet was gone too. |
 | "No drive is connected at …" | The USB folder is not on a mounted drive. Nothing is lost; replug the drive or choose another folder. |
