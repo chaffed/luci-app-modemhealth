@@ -1,0 +1,13 @@
+{
+  "_about": "Synthetic: a TMO-G5AR (API 3.x): no time key, the 5g block without status, 4g null. Every identifier is invented.",
+  "port": 8080,
+  "gateway_all": {
+    "device": { "friendlyName": "5G Gateway", "hardwareVersion": "R01", "manufacturer": "Arcadyan", "macId": "4C:BA:D7:09:6E:31", "model": "TMO-G5AR", "name": "5G Gateway", "serial": "G5AR3302158KM", "softwareVersion": "1.00.06" },
+    "signal": {
+      "4g": null,
+      "5g": { "bands": ["n41", "n25"], "bars": 2.0, "cid": 33, "gNBID": 1590012, "rsrp": -112, "rsrq": -17, "rssi": -95, "sinr": -2 },
+      "generic": { "apn": "FBB.HOME", "hasIPv6": true, "registration": "registered", "roaming": false }
+    }
+  },
+  "version": { "version": 3.1 }
+}

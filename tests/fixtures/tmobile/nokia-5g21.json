@@ -1,0 +1,7 @@
+{
+  "_about": "Synthetic: a Nokia 5G21's open CGI pages, with the field names public clients use (tmo-monitor nokia.py, HINTControl). Every identifier is invented; the full reply shape is not published.",
+  "port": 80,
+  "radio_status": { "cell_LTE_stats_cfg": [ { "stat": { "Band": "B66", "RSRPCurrent": -104, "RSRQCurrent": -12, "SNRCurrent": 4, "RSSICurrent": -79, "PCI": 211 } } ], "cell_5G_stats_cfg": [ { "stat": { "Band": "n71", "RSRPCurrent": -101, "RSRQCurrent": -11, "SNRCurrent": 7, "RSSICurrent": -77, "PCI": 302 } } ], "cell_stat_generic": [ { "X_ALU_COM_TAC": 33017, "RoamingStatus": "Home", "CurrentAccessTechnology": "5G NSA" } ] },
+  "device_info": { "device_app_status": [ { "SerialNumber": "ALCLB31A9F0E", "SoftwareVersion": "1.2103.00.0338", "UpTime": 520311, "HardwareVersion": "3TG00819BA" } ], "device_cfg": [ { "HostName": "Lopez-Laptop", "IPAddress": "192.168.12.144", "MACAddress": "F0:18:98:3D:7A:22" } ] },
+  "device_status": { "device_status": [ { "ModelName": "5G21-12W-A", "Manufacturer": "Nokia" } ] }
+}

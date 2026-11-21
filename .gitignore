@@ -4,6 +4,9 @@ dist/
 capture-raw/
 modem-capture/
 modem-capture.zip
+tmobile-capture/
+tmobile-capture-raw/
+tmobile-capture.zip
 __pycache__/
 .test-out/
 node_modules/

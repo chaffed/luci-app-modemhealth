@@ -50,6 +50,7 @@ top are losses of sync, time-outs and modem restarts.</sub>
 |---|---|
 | ARRIS / Vantiva SURFboard **S34** | Works. Developed and tested on one (firmware `AT01.01.010.042324_S3.04.735`). |
 | ARRIS / Vantiva SURFboard **S33** | Should work: it shares the S34's firmware family and login. Not yet tested on a real one. |
+| T-Mobile 5G Home Internet gateways (KVD21, 5688W, TMO-G4AR/G4SE, TMO-G5AR/G5SE, Nokia 5G21) | In progress ([#28](https://github.com/chaffed/luci-app-modemhealth/issues/28)). Nobody on the project has one yet: if you do, [a 5-minute capture](#helping-add-a-t-mobile-gateway) is the most useful help there is. |
 | Anything else | Not supported yet. **Test connection** in Settings says so. See [Helping add another modem](#helping-add-another-modem). |
 
 The modem has to be a plain cable modem with the router behind it (not a
@@ -322,6 +323,40 @@ Please look through the files yourself all the same, then open an
 modem's model and attach the zip. (`--raw` saves everything unchanged; never
 share that.)
 
+## Helping add a T-Mobile gateway
+
+Support for T-Mobile's 5G gateways is being built from what open-source
+gateway tools have published, but it needs replies from real gateways to be
+trusted. If you have one, run this on any computer with Python 3 that is
+connected to it (directly, or behind your own router):
+
+```sh
+python3 tools/capture-tmobile.py           # about 5 minutes, no password needed
+python3 tools/capture-tmobile.py --login   # also the cell details; asks for the admin password on the label
+```
+
+It writes a folder `tmobile-capture/` and a `tmobile-capture.zip`.
+
+- **It only reads.** The one thing it ever sends is the login (only with
+  `--login`), and it tries that once: after a refusal it does not try again,
+  so it cannot lock the gateway's admin account. It never asks for anything
+  that reboots or changes the gateway, and never for the SIM details, the
+  list of your devices or your Wi-Fi settings.
+- **What identifies you or your home is replaced before anything is saved**:
+  the serial number, MAC addresses, IMEI, IMSI, SIM number and phone number,
+  the gateway's GPS position, and the tower and cell IDs, which can place a
+  home within a few blocks. The same original gets the same stand-in
+  everywhere, so a tower change still shows. The password is never written
+  anywhere.
+- Left in, because support needs them: the model and firmware version, the
+  band, the signal values (RSRP, RSRQ, SINR, RSSI, bars), registration and
+  roaming, uptime, and how long the gateway took to answer.
+
+Look through the files, then attach the zip to an
+[issue](https://github.com/chaffed/luci-app-modemhealth/issues) with the
+gateway's model. (`--raw` also keeps the originals in
+`tmobile-capture-raw/`; never share that.)
+
 ## Command line
 
 ```text
@@ -356,6 +391,7 @@ node tests/ui.test.js          # loading and analysis behind the pages
 node tests/report.test.js      # the report, statement by statement
 node tests/settings.test.js    # every setting is in both forms and the panel's module
 python3 tests/capture.test.py  # what tools/capture.py removes before saving
+python3 tests/capture_tmobile.test.py  # tools/capture-tmobile.py against a fake gateway: safe, and nothing identifying kept
 python3 tests/backend.test.py  # the real backend in an OpenWrt container against a fake modem (Docker)
 sh tests/install.test.sh       # the .ipk: install, upgrade, remove (Docker)
 node tests/luci.test.js        # the pages in a real LuCI, driven by Chrome (Docker, playwright-core)

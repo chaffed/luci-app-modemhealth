@@ -1,0 +1,14 @@
+{
+  "_about": "Synthetic: a TMO-G4AR on 5G only (no 4g block), port 8080, as dave-atx/g4arctrl's fixtures show it. Every identifier is invented.",
+  "port": 8080,
+  "gateway_all": {
+    "device": { "friendlyName": "5G Gateway", "hardwareVersion": "R01", "manufacturer": "Arcadyan", "macId": "D8:EC:5E:73:A1:04", "model": "TMO-G4AR", "name": "5G Gateway", "serial": "G4AR2341007XN", "softwareVersion": "1.00.18" },
+    "signal": {
+      "5g": { "antennaUsed": "Internal_omni", "bands": ["n41"], "bars": 4.0, "cid": 101, "gNBID": 1407755, "rsrp": -94, "rsrq": -10, "rssi": -83, "sinr": 23 },
+      "generic": { "apn": "FBB.HOME", "hasIPv6": true, "registration": "registered", "roaming": false }
+    },
+    "time": { "localTime": 1785309071, "localTimeZone": "-08:00", "upTime": 3600 }
+  },
+  "cell": { "cell": { "5g": { "bandwidth": "100M", "cqi": 15, "earfcn": "501390", "mcc": "310", "mnc": "260", "pci": "123", "sector": { "antennaUsed": "Internal_omni", "bands": ["n41"], "bars": 4.0, "cid": 101, "gNBID": 1407755, "rsrp": -94, "rsrq": -10, "rssi": -83, "sinr": 23 }, "status": true, "tac": "28160" }, "generic": { "apn": "FBB.HOME", "hasIPv6": true, "registration": "registered", "roaming": false }, "gps": { "latitude": 47.6101, "longitude": -122.2015 } } },
+  "version": { "version": 1 }
+}
