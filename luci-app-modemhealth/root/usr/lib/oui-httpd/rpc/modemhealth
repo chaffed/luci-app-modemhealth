@@ -169,6 +169,8 @@ local FIELDS = {
 local LIMIT_KEYS = {
     "ds_power", "ds_snr", "ds_snr_low_power", "ds_power_ofdm", "ds_mer_ofdm",
     "us_power_1", "us_power_2", "us_power_3", "us_power_4", "us_power_ofdma",
+    "lte_rsrp", "lte_rsrq", "lte_sinr", "nr_rsrp", "nr_rsrq", "nr_sinr",
+    "cell_changes_per_day", "radio_drops_per_day",
     "outages_per_day", "t4_per_day", "t3_per_day", "sync_loss_per_day", "reboots_per_day",
     "share_readings_failing", "share_readings_degraded",
 }

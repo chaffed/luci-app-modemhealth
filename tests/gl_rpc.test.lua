@@ -307,7 +307,7 @@ for _ in pairs(M.FIELDS) do n = n + 1 end
 ok("every LuCI setting is known, and nothing else (" .. #luci .. ")", #missing == 0 and n == #luci, table.concat(missing, ","))
 n = 0
 for _ in pairs(M.LIMITS) do n = n + 1 end
-ok("17 limits with four bounds each", n == 68, n)
+ok("25 limits with four bounds each", n == 100, n)
 
 print(fail == 0 and "all passed" or (fail .. " FAILED"))
 os.exit(fail == 0 and 0 or 1)

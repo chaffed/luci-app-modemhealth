@@ -51,6 +51,30 @@ var SOURCES = {
 		title: 'Cisco, "Troubleshooting uBR Cable Modems Not Coming Online" (document 16510)',
 		url: 'https://www.cisco.com/c/en/us/support/docs/broadband-cable/cable-modems/16510-troubleshooting-cm-online.html'
 	},
+	tgpp_36133: {
+		kind: 'spec',
+		title: '3GPP TS 36.133 (ETSI TS 136 133 V17.8.0), LTE requirements for support of radio resource management, clauses 9.1.4, 9.1.7, 9.1.17: RSRP, RSRQ and RS-SINR reporting ranges',
+		url: 'https://www.etsi.org/deliver/etsi_ts/136100_136199/136133/17.08.00_60/ts_136133v170800p.pdf',
+		note: 'Defines only the range a device may report (RSRP -140 to -44 dBm, RSRQ -19.5 to -3 dB, RS-SINR -23 to 40 dB), not what is good. Values outside it are treated as no reading.'
+	},
+	tgpp_38133: {
+		kind: 'spec',
+		title: '3GPP TS 38.133 (ETSI TS 138 133 V17.9.0), NR requirements for support of radio resource management, clauses 10.1.6, 10.1.11, 10.1.16: SS-RSRP, SS-RSRQ and SS-SINR reporting ranges',
+		url: 'https://www.etsi.org/deliver/etsi_ts/138100_138199/138133/17.09.00_60/ts_138133v170900p.pdf',
+		note: 'Defines only the range a device may report (SS-RSRP -156 to -31 dBm, SS-RSRQ -43 to 20 dB, SS-SINR -23 to 40 dB), not what is good. Values outside it are treated as no reading.'
+	},
+	teltonika_signal: {
+		kind: 'vendor',
+		title: 'Teltonika Networks wiki, "Mobile Signal Strength Recommendations" (4G and 5G)',
+		url: 'https://wiki.teltonika-networks.com/view/Mobile_Signal_Strength_Recommendations',
+		note: 'A router maker\'s rule of thumb, which it says varies by modem, carrier and environment. Neither 3GPP nor T-Mobile publishes quality grades for these values.'
+	},
+	digi_5g_bars: {
+		kind: 'vendor',
+		title: 'Digi International, EX15 user guide, "Signal bars explained" (5G)',
+		url: 'https://docsportal.digi.com/ex15_userguide/device/signal-bars-explained.htm',
+		note: 'A router maker\'s mapping of 5G RSRP, RSRQ and SINR to signal bars.'
+	},
 	judgement: {
 		kind: 'judgement',
 		judgement: true,
@@ -125,6 +149,60 @@ var LIMITS = {
 		good: [ null, 48 ], marginal: [ null, 65 ],
 		note: 'DOCSIS 3.1 modems can transmit 65 dBmV in total; the per-channel limit depends on bandwidth, so above 48 dBmV is marked marginal by Modem Health\'s judgement.',
 		sources: [ 'docsis31_phy', 'judgement' ]
+	},
+	/* 4G (LTE) and 5G (NR) signal of a cellular gateway. Neither 3GPP nor
+	 * T-Mobile grades these values; the grades are Teltonika's (which Digi's
+	 * 5G bars agree with), and a value outside the 3GPP reporting range is
+	 * no reading at all. Teltonika: RSRP excellent >= -80, good -80 to -90,
+	 * fair to poor -90 to -100, poor < -100 dBm; RSRQ excellent >= -10,
+	 * good -10 to -15, fair to poor -15 to -20, poor <= -20 dB; SINR
+	 * excellent >= 20, good 13 to 20, fair to poor 0 to 13, poor <= 0 dB. */
+	lte_rsrp: {
+		label: '4G (LTE) signal power, RSRP', unit: 'dBm',
+		good: [ -90, null ], marginal: [ -100, null ],
+		note: 'Teltonika rates RSRP above -90 dBm good and below -100 dBm poor; Digi shows 3 of 5 bars down to -105 dBm. Grades are vendor guidance, not a 3GPP or T-Mobile standard.',
+		sources: [ 'teltonika_signal', 'digi_5g_bars', 'tgpp_36133' ]
+	},
+	lte_rsrq: {
+		label: '4G (LTE) signal quality, RSRQ', unit: 'dB',
+		good: [ -15, null ], marginal: [ -19.5, null ],
+		note: 'Teltonika rates RSRQ down to -15 dB good and -20 dB or lower poor.',
+		sources: [ 'teltonika_signal', 'digi_5g_bars', 'tgpp_36133' ]
+	},
+	lte_sinr: {
+		label: '4G (LTE) signal to noise, SINR', unit: 'dB',
+		good: [ 13, null ], marginal: [ 0.5, null ],
+		note: 'Teltonika rates SINR from 13 dB good and 0 dB or lower poor: at 0 dB the signal is no stronger than the interference.',
+		sources: [ 'teltonika_signal', 'digi_5g_bars', 'tgpp_36133' ]
+	},
+	nr_rsrp: {
+		label: '5G (NR) signal power, SS-RSRP', unit: 'dBm',
+		good: [ -90, null ], marginal: [ -100, null ],
+		note: 'Teltonika gives one table for 4G and 5G: above -90 dBm good, below -100 dBm poor; Digi shows 3 of 5 bars down to -105 dBm. Grades are vendor guidance, not a 3GPP or T-Mobile standard.',
+		sources: [ 'teltonika_signal', 'digi_5g_bars', 'tgpp_38133' ]
+	},
+	nr_rsrq: {
+		label: '5G (NR) signal quality, SS-RSRQ', unit: 'dB',
+		good: [ -15, null ], marginal: [ -19.5, null ],
+		note: 'Teltonika rates RSRQ down to -15 dB good and -20 dB or lower poor; Digi\'s 5G bars put fair at -18 to -15 dB.',
+		sources: [ 'teltonika_signal', 'digi_5g_bars', 'tgpp_38133' ]
+	},
+	nr_sinr: {
+		label: '5G (NR) signal to noise, SS-SINR', unit: 'dB',
+		good: [ 13, null ], marginal: [ 0.5, null ],
+		note: 'Teltonika rates SINR from 13 dB good and 0 dB or lower poor; Digi\'s 5G bars put poor below 0 dB.',
+		sources: [ 'teltonika_signal', 'digi_5g_bars', 'tgpp_38133' ]
+	},
+	cell_changes_per_day: {
+		label: 'Tower changes (gateway)', unit: 'per day',
+		good: [ null, 2 ], marginal: [ null, 12 ],
+		note: 'A gateway in one place should mostly stay on one tower; frequent changes mean the signal is too weak or crowded to hold one. Gateways also report brief false changes, so an occasional one is not counted against the line.',
+		sources: [ 'judgement' ]
+	},
+	radio_drops_per_day: {
+		label: '4G or 5G connection lost (gateway)', unit: 'per day',
+		good: [ null, 0 ], marginal: [ null, 2 ],
+		sources: [ 'judgement' ]
 	},
 	outages_per_day: {
 		label: 'Outages (no internet)', unit: 'per day',
@@ -286,18 +364,41 @@ function channelVerdict(ch, usScqamCount, limits) {
 	return { level: level, checks: checks };
 }
 
+/* -------------------------------------------------------------- radios -- */
+
+/* radioVerdict(radio, limits)
+ * radio: one row of radios.csv (tech lte|nr, rsrp_dbm, rsrq_db, sinr_db).
+ * RSSI and bars are reported, not judged: no source grades RSSI for
+ * these gateways, and bars are the gateway's own summary.
+ * -> { level, checks: [ { metric, value, level, limit } ] } */
+function radioVerdict(radio, limits) {
+	var L = limits || LIMITS, t = radio.tech === 'nr' ? 'nr' : 'lte', checks = [], level = GOOD;
+	[ [ 'rsrp', 'rsrp_dbm' ], [ 'rsrq', 'rsrq_db' ], [ 'sinr', 'sinr_db' ] ].forEach(function(m) {
+		var v = num(radio[m[1]]), limit = L[t + '_' + m[0]];
+		if (v == null || !limit) return;
+		var lv = band(v, limit);
+		checks.push({ metric: m[0], value: v, level: lv, limit: limit });
+		level = worse(level, lv);
+	});
+	return { level: checks.length ? level : UNKNOWN, checks: checks };
+}
+
 /* ------------------------------------------------------------- reading -- */
 
 function countScqamUp(channels) {
 	return channels.filter(function(c) { return c.dir === 'us' && !isOfdm(c); }).length;
 }
 
-/* readingVerdict(reading, channels, limits)
- * reading: one row of readings.csv; channels: its rows of channels.csv
- * -> { level: healthy|degraded|failing|unknown, reasons: [ ... ], channels: [ ... ] } */
-function readingVerdict(reading, channels, limits) {
+/* readingVerdict(reading, channels, limits, radios)
+ * reading: one row of readings.csv; channels: its rows of channels.csv;
+ * radios: for a cellular gateway, its rows of radios.csv (null or
+ * undefined for a cable modem)
+ * -> { level: healthy|degraded|failing|unknown, reasons: [ ... ], channels: [ ... ], radios: [ ... ] } */
+function readingVerdict(reading, channels, limits, radios) {
 	if (!reading || reading.result !== 'ok')
-		return { level: UNKNOWN, reasons: [ { kind: 'failed_reading', detail: reading ? reading.reason : '' } ], channels: [] };
+		return { level: UNKNOWN, reasons: [ { kind: 'failed_reading', detail: reading ? reading.reason : '' } ], channels: [], radios: [] };
+	if (radios)
+		return gatewayVerdict(reading, radios, limits);
 	var usN = countScqamUp(channels), reasons = [], level = HEALTHY;
 	var verdicts = channels.map(function(ch) {
 		var v = channelVerdict(ch, usN, limits);
@@ -318,7 +419,33 @@ function readingVerdict(reading, channels, limits) {
 		level = FAILING;
 	}
 	reasons.sort(function(a, b) { return RANK[b.level] - RANK[a.level]; });
-	return { level: level, reasons: reasons, channels: verdicts };
+	return { level: level, reasons: reasons, channels: verdicts, radios: [] };
+}
+
+/* A gateway's reading: its radios against the signal limits, and it must
+ * be registered on the network with at least one radio connected. */
+function gatewayVerdict(reading, radios, limits) {
+	var reasons = [], level = HEALTHY;
+	var verdicts = radios.map(function(r) {
+		var v = radioVerdict(r, limits);
+		v.radio = r;
+		v.checks.forEach(function(c) {
+			if (c.level === GOOD || c.level === UNKNOWN) return;
+			reasons.push({ kind: (r.tech === 'nr' ? 'nr' : 'lte') + '_' + c.metric, level: c.level, radio: r, value: c.value, limit: c.limit });
+		});
+		return v;
+	});
+	reasons.forEach(function(r) { level = worse(level, r.level === BAD ? FAILING : DEGRADED); });
+	if (reading.connectivity && !/^registered$/i.test(reading.connectivity)) {
+		reasons.push({ kind: 'not_registered', level: BAD, detail: reading.connectivity });
+		level = FAILING;
+	}
+	if (!radios.length) {
+		reasons.push({ kind: 'no_radio', level: BAD });
+		level = FAILING;
+	}
+	reasons.sort(function(a, b) { return RANK[b.level] - RANK[a.level]; });
+	return { level: level, reasons: reasons, channels: [], radios: verdicts };
 }
 
 /* -------------------------------------------------------------- events -- */
@@ -336,11 +463,15 @@ var EVENT_KINDS = [
 	{ kind: 'ranging', re: /RNG-RSP|Ranging Request Retries exhausted/i },
 	{ kind: 'reboot', re: /Cold Start|Warm Start|reboot/i },
 	{ kind: 'status_report', re: /CM-STATUS message sent/i },
-	{ kind: 'config', re: /Diplexer|MIMO Event|TLV-|config file/i }
+	{ kind: 'config', re: /Diplexer|MIMO Event|TLV-|config file/i },
+	/* Written by Modem Health itself for a gateway (it has no event log). */
+	{ kind: 'cell_change', re: /^Tower change on (4G|5G):/ },
+	{ kind: 'band_change', re: /^Band change on (4G|5G):/ },
+	{ kind: 'radio_lost', re: /^(4G|5G) radio no longer connected/ }
 ];
 
 /* Kinds that mean the connection was disrupted. */
-var DISRUPTIVE = { t4: 1, t3: 1, t2: 1, t6: 1, sync_loss: 1, mdd_loss: 1 };
+var DISRUPTIVE = { t4: 1, t3: 1, t2: 1, t6: 1, sync_loss: 1, mdd_loss: 1, cell_change: 1, radio_lost: 1 };
 
 function classifyEvent(message) {
 	for (var i = 0; i < EVENT_KINDS.length; i++)
@@ -485,6 +616,8 @@ function periodVerdict(input, limits) {
 	rate('t3', byKind.t3, L.t3_per_day);
 	rate('sync_loss', byKind.sync_loss, L.sync_loss_per_day);
 	rate('reboot', counts.reboots, L.reboots_per_day);
+	rate('cell_change', byKind.cell_change, L.cell_changes_per_day);
+	rate('radio_lost', byKind.radio_lost, L.radio_drops_per_day);
 
 	var judged = counts.readings - counts.unknown;
 	if (judged > 0) {
@@ -597,7 +730,7 @@ return baseclass.extend({
 	SLOW_BELOW: SLOW_BELOW, LINE_STATES: LINE_STATES, LINE_PROBLEM: LINE_PROBLEM, speedTests: speedTests,
 	num: num, band: band, limitsFor: limitsFor,
 	limitList: limitList, limitFields: limitFields, applySettings: applySettings,
-	channelVerdict: channelVerdict, readingVerdict: readingVerdict,
+	channelVerdict: channelVerdict, readingVerdict: readingVerdict, radioVerdict: radioVerdict,
 	classifyEvent: classifyEvent, parseModemLog: parseModemLog,
 	modemSeconds: modemSeconds, reregistrations: reregistrations, outages: outages,
 	periodVerdict: periodVerdict
