@@ -29,6 +29,9 @@ Control endpoints (plain GET on the same port) for tests:
                                                 settings (GetArrisConfigurationInfo)
                                 reboot_reply=X  answer a reboot with result X
                                                 (default OK)
+                                reload=N        answer the next N login requests with
+                                                LoginResult RELOAD, as a real S34 does
+                                                for a while after a restart
     SetArrisConfigurationInfo with Action "reboot" restarts it (as restart=1,
     and every session is forgotten), when the EEE and LED settings sent with
     it are the current ones; it counts as "settings_changed" otherwise. Any
@@ -100,6 +103,7 @@ class Modem:
         self.retuned = {}
         self.eee, self.led = "0", "1"
         self.reboot_reply = "OK"
+        self.reload = 0
         self.counts = {"requests": 0, "logins": 0, "login_failures": 0,
                        "bad_signatures": 0, "status_reads": 0, "logouts": 0,
                        "unauthorised": 0, "stale_timestamps": 0,
@@ -206,6 +210,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                         m.led = value
                     elif key == "reboot_reply":
                         m.reboot_reply = value
+                    elif key == "reload":
+                        m.reload = int(value)
                 return self.reply(200, m.state())
         # The real modem sends every other page to the login page.
         self.send_response(302)
@@ -312,6 +318,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
             "SetArrisConfigurationInfoResult": "OK", "SetArrisConfigurationInfoAction": "REBOOT"}})
 
     def login(self, m, req, cookies):
+        if req.get("Action") == "request" and m.reload > 0:
+            m.reload -= 1
+            m.counts["reloads"] = m.counts.get("reloads", 0) + 1
+            return self.reply(200, {"LoginResponse": {"LoginResult": "RELOAD"}})
         if req.get("Action") == "request":
             cookie = secrets.token_hex(8)
             challenge = secrets.token_hex(10).upper()

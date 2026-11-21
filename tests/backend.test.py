@@ -379,6 +379,10 @@ def main():
              "cp /out/restart_export/drive/modemhealth/modemhealth-restarts.csv /out/restart_export/drive_restarts.csv; "
              "grep -c 'id=\"mh-restarts\"' /out/restart_export/drive/modemhealth/modemhealth-report.html > /out/restart_export/in_report || true",
              "modemhealth data 0"),
+            # After a restart a real S34 answers logins with RELOAD for a
+            # while: a failed check that says so, and no retry loop.
+            ("login_reload", config(host, PASSWORD, "/out/login_reload/data"),
+             CTL % "reload=1" + "; modemhealth check > /out/login_reload/first.txt 2>&1"),
             # A check and a restart at once take turns (lock): no request is
             # refused for its timestamp, and both succeed.
             ("restart_with_check", config(host, PASSWORD, "/out/restart_with_check/data"),
@@ -836,6 +840,11 @@ def main():
         drive = [l for l in open(os.path.join(d, "drive_restarts.csv")).read().split("\n") if l]
         check(drive == rr, "restart: copied to the drive (%s)" % drive)
         check(open(os.path.join(d, "in_report")).read().strip() == "1", "restart: in the report file on the drive")
+
+        state, readings = scenario("login_reload")
+        check([(r["result"], r["reason"]) for r in readings] == [("failed", "login_not_ready"), ("ok", "")]
+              and state["reloads"] == 1 and state["logins"] == 1,
+              "login RELOAD: stored as failed, login_not_ready (not 'unsupported'); the next check logs in (%s)" % [(r["result"], r["reason"]) for r in readings])
 
         state, readings = scenario("restart_with_check")
         res = json.loads(open(os.path.join(out, "restart_with_check", "output.txt")).read())
