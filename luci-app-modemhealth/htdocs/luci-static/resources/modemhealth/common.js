@@ -373,13 +373,31 @@ function fmtLimit(limit) {
 
 /* Plain-language reason for the summary. hours: length of the period;
  * rates "a day" are only quoted for periods of a day or more. */
+/* Why a check could not read the modem, in words; the stored code follows. */
+var FAILED = {
+	no_password: _('no modem password is saved'),
+	login_refused: _('the modem refused the user name or password'),
+	login_not_ready: _('the modem accepts no login and asks for its login page to be loaded again'),
+	login_LOCKUP: _('the modem has locked logins after too many wrong passwords'),
+	login_REBOOT: _('the modem has locked logins until it is restarted'),
+	unreachable: _('nothing answered at the modem\'s address'),
+	timeout: _('no answer in time'),
+	tls_error: _('no secure connection to the modem'),
+	bad_reply: _('the reply could not be read'),
+	not_a_supported_modem: _('the login reply was not one Modem Health knows'),
+	not_a_supported_device: _('the reply was not a T-Mobile gateway\'s')
+};
+function failedText(code) {
+	return Object.prototype.hasOwnProperty.call(FAILED, code || '') ? '%s (%s)'.format(FAILED[code], code) : (code || '?');
+}
+
 function reasonText(r, hours, gateway) {
 	var L = r.limit || {};
 	var rate = function() {
 		return hours >= 24 ? _(', %.1f a day').format(r.perDay) : (hours ? _(' in %s').format(fmtDuration(hours * 3600)) : '');
 	};
 	switch (r.kind) {
-	case 'failed_reading': return _('The last check could not read the modem (%s).').format(r.detail || '?');
+	case 'failed_reading': return _('The last check could not read the modem: %s.').format(failedText(r.detail));
 	case 'not_operational': return _('The modem reports it is not operational (%s).').format(r.detail || '?');
 	case 'no_downstream': return _('No downstream channels are locked.');
 	case 'not_registered': return _('The gateway is not registered on the mobile network (%s).').format(r.detail || '?');
@@ -708,7 +726,7 @@ function gatewayText(r) {
 return baseclass.extend({
 	C: C, health: health, gatewayText: gatewayText, isGateway: isGateway, verdictOf: verdictOf,
 	callStatus: callStatus, callData: callData, callCheck: callCheck, callTest: callTest, callSetPassword: callSetPassword,
-	callExport: callExport, callClear: callClear, callRestart: callRestart,
+	callExport: callExport, callClear: callClear, callRestart: callRestart, failedText: failedText,
 	parseCSV: parseCSV, load: load, loadDigest: loadDigest, analyse: analyse, toCSV: toCSV, csvField: csvField, esc: esc,
 	fmtTime: fmtTime, isoTime: isoTime, fmtShort: fmtShort, fmtDuration: fmtDuration, fmtNum: fmtNum, fmtInt: fmtInt, fmtLimit: fmtLimit,
 	LEVEL_TEXT: LEVEL_TEXT, reasonText: reasonText, groupReasons: groupReasons, groupedText: groupedText,

@@ -379,10 +379,11 @@ def main():
              "cp /out/restart_export/drive/modemhealth/modemhealth-restarts.csv /out/restart_export/drive_restarts.csv; "
              "grep -c 'id=\"mh-restarts\"' /out/restart_export/drive/modemhealth/modemhealth-report.html > /out/restart_export/in_report || true",
              "modemhealth data 0"),
-            # After a restart a real S34 answers logins with RELOAD for a
-            # while: a failed check that says so, and no retry loop.
-            ("login_reload", config(host, PASSWORD, "/out/login_reload/data"),
-             CTL % "reload=1" + "; modemhealth check > /out/login_reload/first.txt 2>&1"),
+            # After a restart a real S34 answers logins with RELOAD until its
+            # login page is loaded (#50).
+            ("login_reload", config(host, PASSWORD, "/out/login_reload/data"), CTL % "reload=1"),
+            ("login_stuck", config(host, PASSWORD, "/out/login_stuck/data"), CTL % "reload=stuck"),
+            ("login_lockup", config(host, PASSWORD, "/out/login_lockup/data"), CTL % "login_result=LOCKUP"),
             # A check and a restart at once take turns (lock): no request is
             # refused for its timestamp, and both succeed.
             ("restart_with_check", config(host, PASSWORD, "/out/restart_with_check/data"),
@@ -393,6 +394,9 @@ def main():
             ("signal_signs", config(host, PASSWORD, "/out/signal_signs/data"), ":", ":", "sh /out/signal.sh"),
             ("auto_down", config(host, PASSWORD, "/out/auto_down/data", ping_host="nonexistent.invalid"),
              AUTO + "modemhealth check >/dev/null; " + DOWN11, "modemhealth status > /out/auto_down/status.json"),
+            # "Partial Service" with a working internet is no reason (#50).
+            ("auto_partial", config(host, PASSWORD, "/out/auto_partial/data"),
+             AUTO + CTL.replace("%s", "connectivity=Partial%20Service") + "; modemhealth check >/dev/null; " + DOWN11),
             ("auto_off", config(host, PASSWORD, "/out/auto_off/data", ping_host="nonexistent.invalid"),
              "modemhealth check >/dev/null; " + DOWN11),
             ("auto_first", config(host, PASSWORD, "/out/auto_first/data", ping_host="nonexistent.invalid"), AUTO),
@@ -841,10 +845,12 @@ def main():
         check(drive == rr, "restart: copied to the drive (%s)" % drive)
         check(open(os.path.join(d, "in_report")).read().strip() == "1", "restart: in the report file on the drive")
 
-        state, readings = scenario("login_reload")
-        check([(r["result"], r["reason"]) for r in readings] == [("failed", "login_not_ready"), ("ok", "")]
-              and state["reloads"] == 1 and state["logins"] == 1,
-              "login RELOAD: stored as failed, login_not_ready (not 'unsupported'); the next check logs in (%s)" % [(r["result"], r["reason"]) for r in readings])
+        for name, want, pages, reloads, logins in (("login_reload", ("ok", ""), 1, 1, 1), ("login_stuck", ("failed", "login_not_ready"), 1, 2, 0),
+                                                   ("login_lockup", ("failed", "login_LOCKUP"), 0, 0, 0)):
+            state, readings = scenario(name)
+            check([(r["result"], r["reason"]) for r in readings] == [want] and state.get("login_pages", 0) == pages
+                  and state.get("reloads", 0) == reloads and state["logins"] == logins,
+                  "%s: %s, login page loaded %d time(s), no retry loop (%s)" % (name, want, pages, state))
 
         state, readings = scenario("restart_with_check")
         res = json.loads(open(os.path.join(out, "restart_with_check", "output.txt")).read())
@@ -870,6 +876,9 @@ def main():
         st = json.load(open(os.path.join(out, "auto_down", "status.json")))["restart"]
         check(st["auto"] is True and st["last"]["trigger"] == "down" and st["last"]["result"] == "ok" and st["auto_last_day"] == 1 and st["held"] is None,
               "auto: the status shows the last restart (%s)" % st)
+        state, readings = scenario("auto_partial")
+        check(state["reboots"] == 0 and readings[-1]["connectivity"] == "Partial Service" and readings[-1]["inet_ping_loss"] == "0",
+              "auto: Partial Service with a working internet is never restarted")
         state, _ = scenario("auto_off")
         check(state["reboots"] == 0 and not restarts_of("auto_off"), "auto: off by default, nothing restarted")
         state, _ = scenario("auto_first")

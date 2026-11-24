@@ -277,7 +277,7 @@ send the factory reset that sits next to that button.
   | Setting | Default | What it does |
   |---|---|---|
   | Restart the modem automatically | off | Turns the rest on. |
-  | After no connection for | 10 minutes | The modem answers the router, but the internet host doesn't, or the modem is not "Operational", or no downstream channel is locked. |
+  | After no connection for | 10 minutes | The modem answers the router, but the internet host doesn't. A modem reporting "Partial Service" is not restarted while the internet still answers. |
   | Also restart after bad signal | off | Then: after this many bad checks in a row (3). A check is bad when it shows a sign you choose: a channel not locked, a channel outside the acceptable range, at least *N* uncorrectable errors, or at least *N* disruptive log entries (T3/T4 time-outs, loss of sync). |
   | At most this many an hour / a day | 1 / 3 | Then it stops, and the Overview says the restart was held back. |
 
@@ -383,7 +383,7 @@ firmware a drive appears as `/tmp/mountd/disk1_part1`).
 | "Waiting for the router's clock to be set" | The router has just started and has no internet time yet. Checks begin when it has. |
 | Checks stored as failed: `timeout`, `unreachable` | The modem did not answer in time. During an outage this is expected; the pings tell whether the internet was gone too. |
 | "Modem Health would restart the modem …, but automatic restarts are limited to …" | The modem keeps losing its connection, and the limit you set is reached. Modem Health waits rather than restarting again. The line needs the provider. |
-| Checks failed with `login_not_ready` after a restart | The modem doesn't accept logins for a while after it restarts (about 15 minutes on an S34). Checks resume on their own. |
+| Checks fail with `login_not_ready` | The modem accepts no login and asks for its login page to be loaded again, as an S34 can after a restart. Modem Health loads the page and retries; if that isn't enough, log in once on the modem's own page in a browser. |
 | "The modem was not restarted" | The reason follows. A modem that doesn't answer can't be restarted from the router. |
 | "No drive is connected at …" | The USB folder is not on a mounted drive. Nothing is lost; replug the drive or choose another folder. |
 | No **Modem Health** entry in the GL panel | Log out of the panel and in again. If it is still missing: `ssh root@192.168.8.1 /usr/sbin/nginx -s reload`. |

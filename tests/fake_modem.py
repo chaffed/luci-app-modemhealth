@@ -29,9 +29,12 @@ Control endpoints (plain GET on the same port) for tests:
                                                 settings (GetArrisConfigurationInfo)
                                 reboot_reply=X  answer a reboot with result X
                                                 (default OK)
-                                reload=N        answer the next N login requests with
-                                                LoginResult RELOAD, as a real S34 does
-                                                for a while after a restart
+                                reload=1        answer login requests with LoginResult
+                                                RELOAD until /Login.html is loaded (so
+                                                does every reboot, as on a real S34);
+                                                reload=stuck: whatever is loaded
+                                login_result=X  answer login requests with LoginResult X
+                                connectivity=X  the startup connectivity comment
     SetArrisConfigurationInfo with Action "reboot" restarts it (as restart=1,
     and every session is forgotten), when the EEE and LED settings sent with
     it are the current ones; it counts as "settings_changed" otherwise. Any
@@ -103,7 +106,9 @@ class Modem:
         self.retuned = {}
         self.eee, self.led = "0", "1"
         self.reboot_reply = "OK"
-        self.reload = 0
+        self.reload = ""
+        self.login_result = ""
+        self.connectivity = ""
         self.counts = {"requests": 0, "logins": 0, "login_failures": 0,
                        "bad_signatures": 0, "status_reads": 0, "logouts": 0,
                        "unauthorised": 0, "stale_timestamps": 0,
@@ -136,6 +141,8 @@ class Modem:
             added = ["0^11/19/2026 15:%02d:%02d^^Critical^SYNC Timing Synchronization failure - Loss of Sync" % (i // 60, i % 60)
                      for i in range(self.new_events, 0, -1)]
             reply["CustomerStatusLogList"] = "}-{".join((added + entries)[:100])
+        if action == "GetCustomerStatusStartupSequence" and self.connectivity:
+            reply["CustomerConnConnectivityComment"] = self.connectivity
         if action == "GetArrisConfigurationInfo" and "ethSWEthEEE" in reply:
             reply["ethSWEthEEE"], reply["LedStatus"] = self.eee, self.led
         if action == "GetCustomerStatusSoftware" and self.uptime is not None:
@@ -211,8 +218,21 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     elif key == "reboot_reply":
                         m.reboot_reply = value
                     elif key == "reload":
-                        m.reload = int(value)
+                        m.reload = value
+                    elif key == "login_result":
+                        m.login_result = value
+                    elif key == "connectivity":
+                        m.connectivity = value
                 return self.reply(200, m.state())
+        if url.path == "/Login.html":
+            with m.lock:
+                m.counts["login_pages"] = m.counts.get("login_pages", 0) + 1
+                if m.reload != "stuck":
+                    m.reload = ""
+            self.send_response(200)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
         # The real modem sends every other page to the login page.
         self.send_response(302)
         self.send_header("Location", "http://%s/Login.html" % self.headers.get("Host", "192.168.100.1"))
@@ -314,12 +334,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
         m.counts["reboots"] += 1
         m.sessions.clear()
         m.restart()
+        m.reload = "1"
         return self.reply(200, {"SetArrisConfigurationInfoResponse": {
             "SetArrisConfigurationInfoResult": "OK", "SetArrisConfigurationInfoAction": "REBOOT"}})
 
     def login(self, m, req, cookies):
-        if req.get("Action") == "request" and m.reload > 0:
-            m.reload -= 1
+        if req.get("Action") == "request" and m.login_result:
+            return self.reply(200, {"LoginResponse": {"LoginResult": m.login_result}})
+        if req.get("Action") == "request" and m.reload:
             m.counts["reloads"] = m.counts.get("reloads", 0) + 1
             return self.reply(200, {"LoginResponse": {"LoginResult": "RELOAD"}})
         if req.get("Action") == "request":

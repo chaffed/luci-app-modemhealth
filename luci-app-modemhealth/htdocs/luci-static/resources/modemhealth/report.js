@@ -382,7 +382,7 @@ function build(G, o) {
 	}
 	var failedHtml = failed.length ? '<h3>' + esc(gw ? _('Checks that could not read the gateway') : _('Checks that could not read the modem')) + '</h3>' +
 		(failed.length <= 60
-			? table([ _('Time'), _('Why') ], failed.map(function(r) { return [ mh.fmtTime(+r.ts), r.reason || '?' ]; }))
+			? table([ _('Time'), _('Why') ], failed.map(function(r) { return [ mh.fmtTime(+r.ts), mh.failedText(r.reason) ]; }))
 			: '<p>' + esc(_('%d checks; their number per day is in the table above, and each one is in the exported data.').format(failed.length)) + '</p>') : '';
 
 	/* --------------------------------------------------------- 4 signal */
