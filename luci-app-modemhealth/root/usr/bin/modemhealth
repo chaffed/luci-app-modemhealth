@@ -37,7 +37,7 @@ SHARE=${MODEMHEALTH_SHARE:-/usr/share/modemhealth}
 WWW=${MODEMHEALTH_WWW:-/www/luci-static/resources/modemhealth}
 # The report file on a drive carries this many days of history.
 REPORT_DAYS=30
-VERSION=1.2.1   # the package's PKG_VERSION (tests/settings.test.js checks)
+VERSION=1.2.2   # the package's PKG_VERSION (tests/settings.test.js checks)
 HNAP_NS='http://purenetworks.com/HNAP1/'
 STATUS_ACTIONS='GetCustomerStatusStartupSequence GetCustomerStatusConnectionInfo GetCustomerStatusDownstreamChannelInfo GetCustomerStatusUpstreamChannelInfo GetCustomerStatusSoftware GetCustomerStatusLog'
 # Stored per day, in DATA_DIR/readings/ and DATA_DIR/channels/ (see storage).
@@ -157,21 +157,45 @@ curl_failed() { # $1=curl exit code
 	esac
 }
 
+# Login step 1 (no password in it): the reply goes to $1, its LoginResult to
+# LOGIN_RESULT. Sets FAIL_REASON when there is no reply.
+modem_login_request() {
+	local rc
+	LOGIN_RESULT=
+	hnap Login "{\"Login\":{\"Action\":\"request\",\"Username\":$(json_str "$USERNAME"),\"LoginPassword\":\"\",\"Captcha\":\"\",\"PrivateLogin\":\"LoginPassword\"}}" "$1"
+	rc=$?; [ $rc -eq 0 ] || { curl_failed $rc; return 1; }
+	[ "$HTTP_CODE" = 200 ] || { FAIL_REASON="http_$HTTP_CODE"; return 1; }
+	LOGIN_RESULT=$(jsonfilter -i "$1" -e '@.LoginResponse.LoginResult' 2>/dev/null)
+	return 0
+}
+
 modem_login() {
 	local out="$RUN_DIR/login.json" rc challenge public_key cookie result
 	PRIVATE_KEY=; SESSION_UID=
 	if [ -z "$PASSWORD" ]; then FAIL_REASON=no_password; return 1; fi
-	hnap Login "{\"Login\":{\"Action\":\"request\",\"Username\":$(json_str "$USERNAME"),\"LoginPassword\":\"\",\"Captcha\":\"\",\"PrivateLogin\":\"LoginPassword\"}}" "$out"
-	rc=$?; [ $rc -eq 0 ] || { curl_failed $rc; return 1; }
-	[ "$HTTP_CODE" = 200 ] || { FAIL_REASON="http_$HTTP_CODE"; return 1; }
+	modem_login_request "$out" || return 1
+	# RELOAD means "load the login page again", which is what the modem's
+	# own Login.js then does. After a restart a real S34 answered every
+	# login so, once for 30 hours, until something loaded that page (#50);
+	# loading that page alone clears it (tested on the modem 2026-11-27).
+	if [ "$LOGIN_RESULT" = RELOAD ]; then
+		log "the modem asks for its login page to be loaded again; doing that"
+		curl -sk --max-time "$TIMEOUT" -o /dev/null "$BASE/Login.html"
+		modem_login_request "$out" || return 1
+	fi
 	challenge=$(jsonfilter -i "$out" -e '@.LoginResponse.Challenge' 2>/dev/null)
 	public_key=$(jsonfilter -i "$out" -e '@.LoginResponse.PublicKey' 2>/dev/null)
 	cookie=$(jsonfilter -i "$out" -e '@.LoginResponse.Cookie' 2>/dev/null)
-	# RELOAD: the modem's own login page then just loads itself again. A
-	# real S34 answers every login so for a while after a restart (seen for
-	# about 15 minutes on 2026-11-21); it is not ready, not unsupported.
-	if [ "$(jsonfilter -i "$out" -e '@.LoginResponse.LoginResult' 2>/dev/null)" = RELOAD ]; then FAIL_REASON=login_not_ready; return 1; fi
-	if [ -z "$challenge" ] || [ -z "$public_key" ]; then FAIL_REASON=not_a_supported_modem; return 1; fi
+	if [ -z "$challenge" ] || [ -z "$public_key" ]; then
+		# A modem that answers a login, but not with a challenge, is one we
+		# know: say what it answered. Anything else is not.
+		case $LOGIN_RESULT in
+			RELOAD) FAIL_REASON=login_not_ready ;;
+			''|OK) FAIL_REASON=not_a_supported_modem ;;
+			*) FAIL_REASON="login_$(clean "$LOGIN_RESULT")" ;;
+		esac
+		return 1
+	fi
 
 	PRIVATE_KEY=$(hmac "$public_key$PASSWORD" "$challenge")
 	SESSION_UID=$cookie
@@ -1351,9 +1375,14 @@ cable_signs() {
 	read -r unlocked oos dslocked <<-EOF
 	$(printf '%s\n' "$2" | signal_signs)
 	EOF
-	[ "$(echo "$PINGS" | cut -d, -f3)" = 100 ] && DOWN_TEXT="no answer from $PING_HOST"
-	case $3 in [Oo]perational|'') ;; *) DOWN_TEXT="${DOWN_TEXT:+$DOWN_TEXT; }the modem reports $3" ;; esac
-	[ "${dslocked:-0}" -gt 0 ] || DOWN_TEXT="${DOWN_TEXT:+$DOWN_TEXT; }no downstream channel locked"
+	# Only lost pings mean no connection: a modem in "Partial Service" can
+	# carry traffic all day, and a restart would take a working line down.
+	# What the modem says about itself is only added to the reason.
+	if [ "$(echo "$PINGS" | cut -d, -f3)" = 100 ]; then
+		DOWN_TEXT="no answer from $PING_HOST"
+		case $3 in [Oo]perational|'') ;; *) DOWN_TEXT="$DOWN_TEXT; the modem reports $3" ;; esac
+		[ "${dslocked:-0}" -gt 0 ] || DOWN_TEXT="$DOWN_TEXT; no downstream channel locked"
+	fi
 	[ "$RESTART_SIGNAL" = 1 ] || return 0
 	[ "$RESTART_ON_UNLOCKED" = 1 ] && [ "${unlocked:-0}" -gt 0 ] && BAD_TEXT="$unlocked channel(s) not locked"
 	[ "$RESTART_ON_OUT_OF_SPEC" = 1 ] && [ "${oos:-0}" -gt 0 ] && BAD_TEXT="${BAD_TEXT:+$BAD_TEXT; }$oos channel(s) outside the acceptable range"
@@ -1376,9 +1405,11 @@ cable_signs() {
 # radio); no signal rule yet. $1=registration $2=number of radios
 gateway_signs() {
 	DOWN_TEXT=; BAD_TEXT=
-	[ "$(echo "$PINGS" | cut -d, -f3)" = 100 ] && DOWN_TEXT="no answer from $PING_HOST"
-	case $1 in [Rr]egistered|'') ;; *) DOWN_TEXT="${DOWN_TEXT:+$DOWN_TEXT; }the gateway reports $1" ;; esac
-	[ "${2:-0}" -gt 0 ] || DOWN_TEXT="${DOWN_TEXT:+$DOWN_TEXT; }no radio connected"
+	if [ "$(echo "$PINGS" | cut -d, -f3)" = 100 ]; then
+		DOWN_TEXT="no answer from $PING_HOST"
+		case $1 in [Rr]egistered|'') ;; *) DOWN_TEXT="$DOWN_TEXT; the gateway reports $1" ;; esac
+		[ "${2:-0}" -gt 0 ] || DOWN_TEXT="$DOWN_TEXT; no radio connected"
+	fi
 	return 0
 }
 

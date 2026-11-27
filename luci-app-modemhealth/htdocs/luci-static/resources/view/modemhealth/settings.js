@@ -19,7 +19,9 @@ var REASONS = {
 	unreachable: _('The modem did not answer at this address. Is it a cable modem in bridge mode, connected to the router\'s WAN port?'),
 	timeout: _('Nothing answered at this address in time. Check the modem address, and that the modem is on and connected to the router\'s WAN port.'),
 	tls_error: _('Could not set up a secure connection to the modem.'),
-	login_not_ready: _('The modem is not accepting logins yet. After a restart it can take about 15 minutes; checks begin again on their own.'),
+	login_LOCKUP: _('The modem has locked logins after too many wrong passwords. Wait a while, then check the password.'),
+	login_REBOOT: _('The modem has locked logins after too many wrong passwords, and asks to be restarted (by unplugging it).'),
+	login_not_ready: _('The modem keeps asking for its login page to be loaded again and accepts no login. Open the modem\'s own page in a browser and log in there once; if that fails too, unplug the modem for a minute.'),
 	not_a_supported_modem: _('Something answered at this address, but it is not a supported modem (SURFboard S33 or S34).'),
 	not_a_supported_device: _('Something answered at this address, but not like a T-Mobile 5G gateway. Check the address (usually 192.168.12.1) and the modem type.'),
 	bad_reply: _('The modem\'s reply could not be read.'),
@@ -228,7 +230,7 @@ return view.extend({
 		o.rmempty = false;
 		o.default = '0';
 		o = after(s.taboption('restart', form.Value, 'restart_down_min', _('After no connection for (minutes)'),
-			_('No connection: no answer from the internet host, the modem not "Operational", or no downstream channel locked, while the modem itself answers.')));
+			_('No connection: no answer from the internet host while the modem itself answers. "Partial Service" alone is not a reason: the line may still work.')));
 		o.datatype = 'and(uinteger,range(1,240))';
 		o.default = '10';
 		o.placeholder = '10';

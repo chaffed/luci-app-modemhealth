@@ -134,7 +134,7 @@ async function main() {
 	var listed = function(name) { var re = new RegExp(name + ' \\((\\d+)\\): ([0-9:, ]+)', 'g'), m, c = 0, tt = 0; while ((m = re.exec(times))) { c += +m[1]; tt += m[2].split(',').length; } return [ c, tt ]; };
 	eq([ listed('Loss of downstream sync'), listed('T4 time-out'), listed('Re-registration'), listed('Modem restart'), listed('Outage found') ],
 		[ [ 13, 13 ], [ 1, 1 ], [ 2, 2 ], [ 1, 1 ], [ 1, 1 ] ], 'events: every loss of sync, time-out, re-registration, restart and outage is listed with its time');
-	ok(/<td>&lt;i&gt;timeout&lt;\/i&gt;<\/td>/.test(body) && (body.match(/<td>unreachable<\/td>/g) || []).length === 3, 'events: each failed check is listed with its time and reason');
+	ok(/<td>&lt;i&gt;timeout&lt;\/i&gt;<\/td>/.test(body) && (body.match(/<td>nothing answered at the modem(?:&#39;|')s address \(unreachable\)<\/td>/g) || []).length === 3, 'events: each failed check is listed with its time and reason');
 	ok(rb.build(G, Object.assign({}, opts, { times: false })).body.indexOf('Every event, with its time') < 0, 'events: the list of times can be left out');
 
 	/* signal */
