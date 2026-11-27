@@ -176,8 +176,8 @@ modem_login() {
 	modem_login_request "$out" || return 1
 	# RELOAD means "load the login page again", which is what the modem's
 	# own Login.js then does. After a restart a real S34 answered every
-	# login so, once for 30 hours, until something loaded that page (#50).
-	# So load it, as a browser would, and ask once more.
+	# login so, once for 30 hours, until something loaded that page (#50);
+	# loading that page alone clears it (tested on the modem 2026-11-27).
 	if [ "$LOGIN_RESULT" = RELOAD ]; then
 		log "the modem asks for its login page to be loaded again; doing that"
 		curl -sk --max-time "$TIMEOUT" -o /dev/null "$BASE/Login.html"
